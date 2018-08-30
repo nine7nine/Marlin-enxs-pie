@@ -1402,35 +1402,6 @@ static void dequeue_rt_entity(struct sched_rt_entity *rt_se, unsigned int flags)
 	enqueue_top_rt_rq(&rq->rt);
 }
 
-static void sched_rt_update_capacity_req(struct rq *rq)
-{
-	u64 total, used, age_stamp, avg;
-	s64 delta;
-
-	if (!sched_freq())
-		return;
-
-	sched_avg_update(rq);
-	/*
-	 * Since we're reading these variables without serialization make sure
-	 * we read them once before doing sanity checks on them.
-	 */
-	age_stamp = READ_ONCE(rq->age_stamp);
-	avg = READ_ONCE(rq->rt_avg);
-	delta = rq_clock(rq) - age_stamp;
-
-	if (unlikely(delta < 0))
-		delta = 0;
-
-	total = sched_avg_period() + delta;
-
-	used = div_u64(avg, total);
-	if (unlikely(used > SCHED_CAPACITY_SCALE))
-		used = SCHED_CAPACITY_SCALE;
-
-	set_rt_cpu_capacity(rq->cpu, 1, (unsigned long)(used));
-}
-
 /*
  * Adding/removing a task to/from a priority array:
  */
@@ -1438,10 +1409,6 @@ static void
 enqueue_task_rt(struct rq *rq, struct task_struct *p, int flags)
 {
 	struct sched_rt_entity *rt_se = &p->rt;
-
-#ifdef CONFIG_SMP
-	schedtune_enqueue_task(p, cpu_of(rq));
-#endif
 
 	if (flags & ENQUEUE_WAKEUP)
 		rt_se->timeout = 0;
@@ -1451,25 +1418,17 @@ enqueue_task_rt(struct rq *rq, struct task_struct *p, int flags)
 
 	if (!task_current(rq, p) && tsk_nr_cpus_allowed(p) > 1)
 		enqueue_pushable_task(rq, p);
-
-	sched_rt_update_capacity_req(rq);
 }
 
 static void dequeue_task_rt(struct rq *rq, struct task_struct *p, int flags)
 {
 	struct sched_rt_entity *rt_se = &p->rt;
 
-#ifdef CONFIG_SMP
-	schedtune_dequeue_task(p, cpu_of(rq));
-#endif
-
 	update_curr_rt(rq);
 	dequeue_rt_entity(rt_se, flags);
 	walt_dec_cumulative_runnable_avg(rq, p);
 
 	dequeue_pushable_task(rq, p);
-
-	sched_rt_update_capacity_req(rq);
 }
 
 /*
@@ -1987,16 +1946,6 @@ static struct rq *find_lock_lowest_rq(struct task_struct *task, struct rq *rq)
 			break;
 		}
 
-		if (lowest_rq->rt.highest_prio.curr <= task->prio) {
-			/*
-			 * Target rq has tasks of equal or higher priority,
-			 * retrying does not release any lock and is unlikely
-			 * to yield a different result.
-			 */
-			lowest_rq = NULL;
-			break;
-		}
-
 		/* if the prio of this runqueue changed, try again */
 		if (double_lock_balance(rq, lowest_rq)) {
 			/*
@@ -2496,7 +2445,7 @@ static void switched_to_rt(struct rq *rq, struct task_struct *p)
 		if (tsk_nr_cpus_allowed(p) > 1 && rq->rt.overloaded)
 			queue_push_tasks(rq);
 #endif /* CONFIG_SMP */
-		if (p->prio < rq->curr->prio)
+		if (p->prio < rq->curr->prio && cpu_online(cpu_of(rq)))
 			resched_curr(rq);
 	}
 }
