@@ -80,8 +80,8 @@
 
 #ifdef CONFIG_BOOSTBOX
 #include <linux/boostbox.h>
-#endif /* CONFIG_BOOSTOBX */
 #include <linux/devfreq_boost.h>
+#endif /* CONFIG_BOOSTOBX */
 
 #include <asm/pgtable.h>
 #include <asm/pgalloc.h>
