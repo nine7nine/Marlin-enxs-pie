@@ -263,7 +263,7 @@ struct rq *__task_rq_lock(struct task_struct *p, struct rq_flags *rf)
 		rq = task_rq(p);
 		raw_spin_lock(&rq->lock);
 		if (likely(rq == task_rq(p) && !task_on_rq_migrating(p))) {
-			rf->cookie = lockdep_pin_lock(&rq->lock);
+			rq_pin_lock(rq, rf);
 			return rq;
 		}
 		raw_spin_unlock(&rq->lock);
@@ -303,7 +303,7 @@ struct rq *task_rq_lock(struct task_struct *p, struct rq_flags *rf)
 		 * pair with the WMB to ensure we must then also see migrating.
 		 */
 		if (likely(rq == task_rq(p) && !task_on_rq_migrating(p))) {
-			rf->cookie = lockdep_pin_lock(&rq->lock);
+			rq_pin_lock(rq, rf);
 			return rq;
 		}
 		raw_spin_unlock(&rq->lock);
@@ -1353,9 +1353,9 @@ static int __set_cpus_allowed_ptr(struct task_struct *p,
 		 * OK, since we're going to drop the lock immediately
 		 * afterwards anyway.
 		 */
-		lockdep_unpin_lock(&rq->lock, rf.cookie);
+		rq_unpin_lock(rq, &rf);
 		rq = move_queued_task(rq, p, dest_cpu);
-		lockdep_repin_lock(&rq->lock, rf.cookie);
+		rq_repin_lock(rq, &rf);
 	}
 out:
 	task_rq_unlock(rq, p, &rf);
@@ -1847,7 +1847,7 @@ static void ttwu_activate(struct rq *rq, struct task_struct *p, int en_flags)
  * Mark the task runnable and perform wakeup-preemption.
  */
 static void ttwu_do_wakeup(struct rq *rq, struct task_struct *p, int wake_flags,
-			   struct pin_cookie cookie)
+			   struct rq_flags *rf)
 {
 	check_preempt_curr(rq, p, wake_flags);
 	p->state = TASK_RUNNING;
@@ -2789,9 +2789,9 @@ void wake_up_new_task(struct task_struct *p)
 		 * Nothing relies on rq->lock after this, so its fine to
 		 * drop it.
 		 */
-		lockdep_unpin_lock(&rq->lock, cookie);
+		rq_unpin_lock(rq, rf);
 		p->sched_class->task_woken(rq, p);
-		lockdep_repin_lock(&rq->lock, cookie);
+		rq_repin_lock(rq, rf);
 	}
 #endif
 	task_rq_unlock(rq, p, &flags);
@@ -4131,7 +4131,7 @@ int task_prio(const struct task_struct *p)
 int idle_cpu(int cpu)
 {
 	struct rq *rq = cpu_rq(cpu);
-	struct pin_cookie cookie;
+	struct rq_flags rf;
 
 	if (rq->curr != rq->idle)
 		return 0;
@@ -5560,7 +5560,15 @@ void init_idle(struct task_struct *idle, int cpu)
 	idle->state = TASK_RUNNING;
 	idle->se.exec_start = sched_clock();
 
-	do_set_cpus_allowed(idle, cpumask_of(cpu));
+#ifdef CONFIG_SMP
+	/*
+	 * Its possible that init_idle() gets called multiple times on a task,
+	 * in that case do_set_cpus_allowed() will not do the right thing.
+	 *
+	 * And since this is boot we can forgo the serialization.
+	 */
+	set_cpus_allowed_common(idle, cpumask_of(cpu));
+#endif
 	/*
 	 * We're having a chicken and egg problem, even though we are
 	 * holding rq->lock, the cpu isn't yet set to this cpu so the
@@ -5598,6 +5606,8 @@ void init_idle(struct task_struct *idle, int cpu)
 }
 
 #ifdef CONFIG_SMP
+
+static bool sched_smp_initialized __read_mostly;
 
 #ifdef CONFIG_NUMA_BALANCING
 /* Migrate current task p to target_cpu */
@@ -5668,13 +5678,15 @@ void idle_task_exit(void)
 /*
  * Since this CPU is going 'away' for a while, fold any nr_active delta
  * we might have. Assumes we're called after migrate_tasks() so that the
- * nr_active count is stable.
+ * nr_active count is stable. We need to take the teardown thread which
+ * is calling this into account, so we hand in adjust = 1 to the load
+ * calculation.
  *
  * Also see the comment "Global load-average calculations".
  */
 static void calc_load_migrate(struct rq *rq)
 {
-	long delta = calc_load_fold_active(rq);
+	long delta = calc_load_fold_active(rq, 1);
 	if (delta)
 		atomic_long_add(delta, &calc_load_tasks);
 }
@@ -5950,25 +5962,6 @@ static int sched_cpu_inactive(struct notifier_block *nfb,
 
 	return NOTIFY_DONE;
 }
-
-static int __init migration_init(void)
-{
-	void *cpu = (void *)(long)smp_processor_id();
-	int err;
-
-	/* Initialize migration for the boot CPU */
-	err = migration_call(&migration_notifier, CPU_UP_PREPARE, cpu);
-	BUG_ON(err == NOTIFY_BAD);
-	migration_call(&migration_notifier, CPU_ONLINE, cpu);
-	register_cpu_notifier(&migration_notifier);
-
-	/* Register cpu active notifiers */
-	cpu_notifier(sched_cpu_active, CPU_PRI_SCHED_ACTIVE);
-	cpu_notifier(sched_cpu_inactive, CPU_PRI_SCHED_INACTIVE);
-
-	return 0;
-}
-early_initcall(migration_init);
 
 static cpumask_var_t sched_domains_tmpmask; /* sched_domains_mutex */
 
@@ -7331,6 +7324,9 @@ static int sched_domains_numa_masks_update(struct notifier_block *nfb,
 {
 	int cpu = (long)hcpu;
 
+	if (!sched_smp_initialized)
+		return NOTIFY_DONE;
+
 	switch (action & ~CPU_TASKS_FROZEN) {
 	case CPU_ONLINE:
 		sched_domains_numa_masks_set(cpu);
@@ -7774,6 +7770,9 @@ static int num_cpus_frozen;	/* used to mark begin/end of suspend/resume */
 static int cpuset_cpu_active(struct notifier_block *nfb, unsigned long action,
 			     void *hcpu)
 {
+	if (!sched_smp_initialized)
+		return NOTIFY_DONE;
+
 	switch (action) {
 	case CPU_ONLINE_FROZEN:
 	case CPU_DOWN_FAILED_FROZEN:
@@ -7808,6 +7807,9 @@ static int cpuset_cpu_active(struct notifier_block *nfb, unsigned long action,
 static int cpuset_cpu_inactive(struct notifier_block *nfb, unsigned long action,
 			       void *hcpu)
 {
+	if (!sched_smp_initialized)
+		return NOTIFY_DONE;
+
 	switch (action) {
 	case CPU_DOWN_PREPARE:
 		cpuset_update_active_cpus(false);
@@ -7843,10 +7845,6 @@ void __init sched_init_smp(void)
 		cpumask_set_cpu(smp_processor_id(), non_isolated_cpus);
 	mutex_unlock(&sched_domains_mutex);
 
-	hotcpu_notifier(sched_domains_numa_masks_update, CPU_PRI_SCHED_ACTIVE);
-	hotcpu_notifier(cpuset_cpu_active, CPU_PRI_CPUSET_ACTIVE);
-	hotcpu_notifier(cpuset_cpu_inactive, CPU_PRI_CPUSET_INACTIVE);
-
 	init_hrtick();
 
 	/* Move init over to a non-isolated CPU */
@@ -7857,9 +7855,32 @@ void __init sched_init_smp(void)
 
 	init_sched_rt_class();
 	init_sched_dl_class();
-
-	sched_clock_init_late();
+	sched_smp_initialized = true;
 }
+
+static int __init migration_init(void)
+{
+	void *cpu = (void *)(long)smp_processor_id();
+	int err;
+
+	/* Initialize migration for the boot CPU */
+	err = migration_call(&migration_notifier, CPU_UP_PREPARE, cpu);
+	BUG_ON(err == NOTIFY_BAD);
+	migration_call(&migration_notifier, CPU_ONLINE, cpu);
+	register_cpu_notifier(&migration_notifier);
+
+	/* Register cpu active notifiers */
+	cpu_notifier(sched_cpu_active, CPU_PRI_SCHED_ACTIVE);
+	cpu_notifier(sched_cpu_inactive, CPU_PRI_SCHED_INACTIVE);
+
+	hotcpu_notifier(sched_domains_numa_masks_update, CPU_PRI_SCHED_ACTIVE);
+	hotcpu_notifier(cpuset_cpu_active, CPU_PRI_CPUSET_ACTIVE);
+	hotcpu_notifier(cpuset_cpu_inactive, CPU_PRI_CPUSET_INACTIVE);
+
+	return 0;
+}
+early_initcall(migration_init);
+
 #else
 void __init sched_init_smp(void)
 {
@@ -7921,9 +7942,6 @@ void __init sched_init(void)
 #ifdef CONFIG_RT_GROUP_SCHED
 	alloc_size += 2 * nr_cpu_ids * sizeof(void **);
 #endif
-#ifdef CONFIG_CPUMASK_OFFSTACK
-	alloc_size += num_possible_cpus() * cpumask_size();
-#endif
 	if (alloc_size) {
 		ptr = (unsigned long)kzalloc(alloc_size, GFP_NOWAIT);
 
@@ -7943,15 +7961,15 @@ void __init sched_init(void)
 		ptr += nr_cpu_ids * sizeof(void **);
 
 #endif /* CONFIG_RT_GROUP_SCHED */
+	}
 #ifdef CONFIG_CPUMASK_OFFSTACK
-		for_each_possible_cpu(i) {
-			per_cpu(load_balance_mask, i) = (void *)ptr;
-			ptr += cpumask_size();
+	for_each_possible_cpu(i) {
+		per_cpu(load_balance_mask, i) = (cpumask_var_t)kzalloc_node(
+			cpumask_size(), GFP_KERNEL, cpu_to_node(i));
 		per_cpu(select_idle_mask, i) = (cpumask_var_t)kzalloc_node(
 			cpumask_size(), GFP_KERNEL, cpu_to_node(i));
 		}
 #endif /* CONFIG_CPUMASK_OFFSTACK */
-	}
 
 	init_rt_bandwidth(&def_rt_bandwidth,
 			global_rt_period(), global_rt_runtime());
@@ -8022,8 +8040,6 @@ void __init sched_init(void)
 		for (j = 0; j < CPU_LOAD_IDX_MAX; j++)
 			rq->cpu_load[j] = 0;
 
-		rq->last_load_update_tick = jiffies;
-
 #ifdef CONFIG_SMP
 		rq->sd = NULL;
 		rq->rd = NULL;
@@ -8050,6 +8066,7 @@ void __init sched_init(void)
 
 		rq_attach_root(rq, &def_root_domain);
 #ifdef CONFIG_NO_HZ_COMMON
+		rq->last_load_update_tick = jiffies;
 		rq->nohz_flags = 0;
 #endif
 #ifdef CONFIG_NO_HZ_FULL
@@ -8105,7 +8122,7 @@ void __init sched_init(void)
 #ifdef CONFIG_DEBUG_ATOMIC_SLEEP
 static inline int preempt_count_equals(int preempt_offset)
 {
-	int nested = (preempt_count() & ~PREEMPT_ACTIVE) + rcu_preempt_depth();
+	int nested = preempt_count() + rcu_preempt_depth();
 
 	return (nested == preempt_offset);
 }
@@ -8125,7 +8142,7 @@ void __might_sleep(const char *file, int line, int preempt_offset)
 	 * since we will exit with TASK_RUNNING make sure we enter with it,
 	 * otherwise we will destroy state.
 	 */
-	if (WARN_ONCE(current->state != TASK_RUNNING,
+	WARN_ONCE(current->state != TASK_RUNNING && current->task_state_change,
 			"do not call blocking ops when !TASK_RUNNING; "
 			"state=%lx set at [<%p>] %pS\n",
 			current->state,
@@ -8139,6 +8156,7 @@ EXPORT_SYMBOL(__might_sleep);
 void ___might_sleep(const char *file, int line, int preempt_offset)
 {
 	static unsigned long prev_jiffy;	/* ratelimiting */
+	unsigned long preempt_disable_ip;
 
 	rcu_sleep_check(); /* WARN_ON_ONCE() by default, no rate limit reqd. */
 	if ((preempt_count_equals(preempt_offset) && !irqs_disabled() &&
@@ -8150,6 +8168,9 @@ void ___might_sleep(const char *file, int line, int preempt_offset)
 	if (time_before(jiffies, prev_jiffy + HZ) && prev_jiffy)
 		return;
 	prev_jiffy = jiffies;
+
+	/* Save this before calling printk(), since that will clobber it */
+	preempt_disable_ip = get_preempt_disable_ip(current);
 
 	printk(KERN_ERR
 		"BUG: sleeping function called from invalid context at %s:%d\n",
@@ -8165,13 +8186,12 @@ void ___might_sleep(const char *file, int line, int preempt_offset)
 	debug_show_held_locks(current);
 	if (irqs_disabled())
 		print_irqtrace_events(current);
-#ifdef CONFIG_DEBUG_PREEMPT
-	if (!preempt_count_equals(preempt_offset)) {
+	if (IS_ENABLED(CONFIG_DEBUG_PREEMPT)
+	    && !preempt_count_equals(preempt_offset)) {
 		pr_err("Preemption disabled at:");
-		print_ip_sym(current->preempt_disable_ip);
+		print_ip_sym(preempt_disable_ip);
 		pr_cont("\n");
 	}
-#endif
 	dump_stack();
 }
 EXPORT_SYMBOL(___might_sleep);
@@ -8958,10 +8978,18 @@ static int tg_set_cfs_bandwidth(struct task_group *tg, u64 period, u64 quota)
 	cfs_b->period = ns_to_ktime(period);
 	cfs_b->quota = quota;
 
-	__refill_cfs_bandwidth_runtime(cfs_b);
-	/* restart the period timer (if active) to handle new period expiry */
-	if (runtime_enabled)
+	if (runtime_enabled) {
+		u64 now;
+
+		cfs_b->runtime = cfs_b->quota;
+		cfs_b->burst = nr_cpu_ids * quota;
+		now = sched_clock_cpu(smp_processor_id());
+		cfs_b->last_active = now;
+		cfs_b->runtime_expires = now + ktime_to_ns(cfs_b->period);
+		/* Restart the period timer (if active) to handle new period expiry: */
 		start_cfs_bandwidth(cfs_b);
+	}
+
 	raw_spin_unlock_irq(&cfs_b->lock);
 
 	for_each_online_cpu(i) {
@@ -9031,6 +9059,66 @@ long tg_get_cfs_period(struct task_group *tg)
 	return cfs_period_us;
 }
 
+static int tg_set_cfs_burst(struct task_group *tg, long cfs_burst_us)
+{
+	struct cfs_bandwidth *cfs_b = &tg->cfs_bandwidth;
+	u64 quota, burst;
+
+	if (cfs_burst_us <= 0)
+		return -ERANGE;
+	quota = tg->cfs_bandwidth.quota;
+	if (quota == RUNTIME_INF)
+		return -EINVAL;
+	burst = (u64)cfs_burst_us * NSEC_PER_USEC;
+	if (burst < quota)
+		return -EINVAL;
+
+	raw_spin_lock_irq(&cfs_b->lock);
+	cfs_b->burst = burst;
+	raw_spin_unlock_irq(&cfs_b->lock);
+	return 0;
+}
+
+static long tg_get_cfs_burst(struct task_group *tg)
+{
+	u64 burst_us;
+
+	burst_us = tg->cfs_bandwidth.burst;
+	do_div(burst_us, NSEC_PER_USEC);
+
+	return burst_us;
+}
+
+static int tg_set_cfs_slice(struct task_group *tg, long cfs_slice_us)
+{
+	struct cfs_bandwidth *cfs_b = &tg->cfs_bandwidth;
+	u64 quota, slice;
+
+	if (cfs_slice_us <= 0)
+		return -ERANGE;
+	quota = tg->cfs_bandwidth.quota;
+	if (quota == RUNTIME_INF)
+		return -EINVAL;
+	slice = (u64)cfs_slice_us * NSEC_PER_USEC;
+	if (slice > quota)
+		return -EINVAL;
+
+	raw_spin_lock_irq(&cfs_b->lock);
+	cfs_b->slice = slice;
+	raw_spin_unlock_irq(&cfs_b->lock);
+	return 0;
+}
+
+static long tg_get_cfs_slice(struct task_group *tg)
+{
+	u64 slice_us;
+
+	slice_us = tg->cfs_bandwidth.slice;
+	do_div(slice_us, NSEC_PER_USEC);
+
+	return slice_us;
+}
+
 static s64 cpu_cfs_quota_read_s64(struct cgroup_subsys_state *css,
 				  struct cftype *cft)
 {
@@ -9053,6 +9141,30 @@ static int cpu_cfs_period_write_u64(struct cgroup_subsys_state *css,
 				    struct cftype *cftype, u64 cfs_period_us)
 {
 	return tg_set_cfs_period(css_tg(css), cfs_period_us);
+}
+
+static s64 cpu_cfs_burst_read_s64(struct cgroup_subsys_state *css,
+				  struct cftype *cft)
+{
+	return tg_get_cfs_burst(css_tg(css));
+}
+
+static int cpu_cfs_burst_write_s64(struct cgroup_subsys_state *css,
+				   struct cftype *cftype, s64 cfs_quota_us)
+{
+	return tg_set_cfs_burst(css_tg(css), cfs_quota_us);
+}
+
+static s64 cpu_cfs_slice_read_s64(struct cgroup_subsys_state *css,
+				  struct cftype *cft)
+{
+	return tg_get_cfs_slice(css_tg(css));
+}
+
+static int cpu_cfs_slice_write_s64(struct cgroup_subsys_state *css,
+				   struct cftype *cftype, s64 cfs_quota_us)
+{
+	return tg_set_cfs_slice(css_tg(css), cfs_quota_us);
 }
 
 struct cfs_schedulable_data {
@@ -9191,6 +9303,16 @@ static struct cftype cpu_files[] = {
 		.name = "cfs_period_us",
 		.read_u64 = cpu_cfs_period_read_u64,
 		.write_u64 = cpu_cfs_period_write_u64,
+	},
+	{
+		.name = "cfs_burst_us",
+		.read_s64 = cpu_cfs_burst_read_s64,
+		.write_s64 = cpu_cfs_burst_write_s64,
+	},
+	{
+		.name = "cfs_slice_us",
+		.read_s64 = cpu_cfs_slice_read_s64,
+		.write_s64 = cpu_cfs_slice_write_s64,
 	},
 	{
 		.name = "stat",
