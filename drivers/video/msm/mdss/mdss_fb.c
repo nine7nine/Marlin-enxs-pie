@@ -4844,11 +4844,9 @@ int mdss_fb_do_ioctl(struct fb_info *info, unsigned int cmd,
 
 	case MSMFB_ATOMIC_COMMIT:
 #ifdef CONFIG_BOOSTBOX
-#ifdef CONFIG_BOOSTBOX
 		boostbox_top_app_kick();
 		boostbox_gfx_kick();
 		boostbox_rt_kick();
-#endif /* CONFIG_BOOSTOBX */
 #endif /* CONFIG_BOOSTOBX */
 		ret = mdss_fb_atomic_commit_ioctl(info, argp, file);
 		break;

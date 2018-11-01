@@ -42,16 +42,13 @@ void swake_up_all_locked(struct swait_queue_head *q)
 		list_del_init(&curr->task_list);
 		wakes++;
 	}
-	WARN_ON(wakes > 2);
+	//WARN_ON(wakes > 2);
 }
 EXPORT_SYMBOL(swake_up_all_locked);
 
 void swake_up(struct swait_queue_head *q)
 {
 	unsigned long flags;
-
-	if (!swait_active(q))
-		return;
 
 	raw_spin_lock_irqsave(&q->lock, flags);
 	swake_up_locked(q);
@@ -67,9 +64,6 @@ void swake_up_all(struct swait_queue_head *q)
 {
 	struct swait_queue *curr;
 	LIST_HEAD(tmp);
-
-	if (!swait_active(q))
-		return;
 
 	raw_spin_lock_irq(&q->lock);
 	list_splice_init(&q->task_list, &tmp);
