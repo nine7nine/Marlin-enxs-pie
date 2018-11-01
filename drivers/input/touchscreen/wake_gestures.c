@@ -88,12 +88,12 @@ static struct input_dev *gesture_dev;
 #endif
 
 /* Resources */
-int s2w_switch = 0;
+int s2w_switch = S2W_DEFAULT;
 bool dt2w_switch = false;
 bool wg_switch = false;
 bool wg_switch_temp = false;
 bool wg_changed = false;
-static int s2s_switch = 0;
+static int s2s_switch = S2S_DEFAULT;
 static int touch_x = 0, touch_y = 0;
 static bool touch_x_called = false, touch_y_called = false;
 static bool exec_countx = true, exec_county = true, exec_count = true;
