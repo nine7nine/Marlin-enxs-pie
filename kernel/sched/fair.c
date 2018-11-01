@@ -2216,7 +2216,7 @@ void task_numa_work(struct callback_head *work)
 	}
 	for (; vma; vma = vma->vm_next) {
 		if (!vma_migratable(vma) || !vma_policy_mof(vma) ||
-		    is_vm_hugetlb_page(vma) || (vma->vm_flags & VM_MIXEDMAP)) {
+			is_vm_hugetlb_page(vma) || (vma->vm_flags & VM_MIXEDMAP)) {
 			continue;
 		}
 
@@ -2802,7 +2802,7 @@ update_tg_cfs_load(struct cfs_rq *cfs_rq, struct sched_entity *se)
 
 		/*
 		 * We need to compute a correction term in the case that the
-		 * task group is consuming more cpu than a task of equal
+		 * task group is consuming more CPU than a task of equal
 		 * weight. A task with a weight equals to tg->shares will have
 		 * a load less or equal to scale_load_down(tg->shares).
 		 * Similarly, the sched_entities that represent the task group
@@ -2844,22 +2844,17 @@ update_tg_cfs_load(struct cfs_rq *cfs_rq, struct sched_entity *se)
 
 static inline void set_tg_cfs_propagate(struct cfs_rq *cfs_rq)
 {
-	/* set cfs_rq's flag */
 	cfs_rq->propagate_avg = 1;
 }
 
 static inline int test_and_clear_tg_cfs_propagate(struct sched_entity *se)
 {
-	/* Get my cfs_rq */
 	struct cfs_rq *cfs_rq = group_cfs_rq(se);
 
-	/* Nothing to propagate */
 	if (!cfs_rq->propagate_avg)
 		return 0;
 
-	/* Clear my cfs_rq's flag */
 	cfs_rq->propagate_avg = 0;
-
 	return 1;
 }
 
@@ -2874,16 +2869,11 @@ static inline int propagate_entity_load_avg(struct sched_entity *se)
 	if (!test_and_clear_tg_cfs_propagate(se))
 		return 0;
 
-	/* Get parent cfs_rq */
 	cfs_rq = cfs_rq_of(se);
 
-	/* Propagate to parent */
 	set_tg_cfs_propagate(cfs_rq);
 
-	/* Update utilization */
 	update_tg_cfs_util(cfs_rq, se);
-
-	/* Update load */
 	update_tg_cfs_load(cfs_rq, se);
 
 	return 1;
@@ -5144,7 +5134,7 @@ struct energy_env {
 	int			trg_cpu;
 	int			energy;
 	int			payoff;
-	struct task_struct	*task;
+	struct task_struct	*p;
 	struct {
 		int before;
 		int after;
@@ -5190,7 +5180,7 @@ static unsigned long group_max_util(struct energy_env *eenv)
 	int cpu;
 
 	for_each_cpu(cpu, sched_group_cpus(eenv->sg_cap)) {
-		util = cpu_util_wake(cpu, eenv->task);
+		util = cpu_util_wake(cpu, eenv->p);
 
 		/*
 		 * If we are looking at the target CPU specified by the eenv,
@@ -5225,7 +5215,7 @@ long group_norm_util(struct energy_env *eenv, struct sched_group *sg)
 	int cpu;
 
 	for_each_cpu(cpu, sched_group_cpus(sg)) {
-		util = cpu_util_wake(cpu, eenv->task);
+		util = cpu_util_wake(cpu, eenv->p);
 
 		/*
 		 * If we are looking at the target CPU specified by the eenv,
@@ -5327,7 +5317,7 @@ static int group_idle_state(struct energy_env *eenv, struct sched_group *sg)
 	 * achievable when we move the task.
 	 */
 	for_each_cpu(i, sched_group_cpus(sg)) {
-		grp_util += cpu_util_wake(i, eenv->task);
+		grp_util += cpu_util_wake(i, eenv->p);
 		if (unlikely(i == eenv->trg_cpu))
 			grp_util += eenv->util_delta;
 	}
@@ -5519,13 +5509,13 @@ static inline int __energy_diff(struct energy_env *eenv)
 	int diff, margin;
 
 	struct energy_env eenv_before = {
-		.util_delta	= task_util(eenv->task),
+		.util_delta	= task_util(eenv->p),
 		.src_cpu	= eenv->src_cpu,
 		.dst_cpu	= eenv->dst_cpu,
 		.trg_cpu	= eenv->src_cpu,
 		.nrg		= { 0, 0, 0, 0},
 		.cap		= { 0, 0, 0 },
-		.task		= eenv->task,
+		.p  		= eenv->p,
 	};
 
 	if (eenv->src_cpu == eenv->dst_cpu)
@@ -5562,7 +5552,7 @@ static inline int __energy_diff(struct energy_env *eenv)
 	eenv->nrg.diff = eenv->nrg.after - eenv->nrg.before;
 	eenv->payoff = 0;
 #ifndef CONFIG_SCHED_TUNE
-	trace_sched_energy_diff(eenv->task,
+	trace_sched_energy_diff(eenv->p,
 			eenv->src_cpu, eenv->dst_cpu, eenv->util_delta,
 			eenv->nrg.before, eenv->nrg.after, eenv->nrg.diff,
 			eenv->cap.before, eenv->cap.after, eenv->cap.delta,
@@ -5632,7 +5622,7 @@ normalize_energy(int energy_diff)
 static inline int
 energy_diff(struct energy_env *eenv)
 {
-	int boost = schedtune_task_boost(eenv->task);
+	int boost = schedtune_task_boost(eenv->p);
 	int nrg_delta;
 
 	/* Conpute "absolute" energy diff */
@@ -5640,7 +5630,7 @@ energy_diff(struct energy_env *eenv)
 
 	/* Return energy diff when boost margin is 0 */
 	if (boost == 0) {
-		trace_sched_energy_diff(eenv->task,
+		trace_sched_energy_diff(eenv->p,
 				eenv->src_cpu, eenv->dst_cpu, eenv->util_delta,
 				eenv->nrg.before, eenv->nrg.after, eenv->nrg.diff,
 				eenv->cap.before, eenv->cap.after, eenv->cap.delta,
@@ -5655,9 +5645,9 @@ energy_diff(struct energy_env *eenv)
 	eenv->payoff = schedtune_accept_deltas(
 			eenv->nrg.delta,
 			eenv->cap.delta,
-			eenv->task);
+			eenv->p);
 
-	trace_sched_energy_diff(eenv->task,
+	trace_sched_energy_diff(eenv->p,
 			eenv->src_cpu, eenv->dst_cpu, eenv->util_delta,
 			eenv->nrg.before, eenv->nrg.after, eenv->nrg.diff,
 			eenv->cap.before, eenv->cap.after, eenv->cap.delta,
@@ -6076,7 +6066,6 @@ static int select_idle_sibling(struct task_struct *p, int prev, int target)
 		sg = sd->groups;
 		do {
 			int i;
-
 			if (!cpumask_intersects(sched_group_cpus(sg),
 						tsk_cpus_allowed(p)))
 				goto next;
@@ -6636,8 +6625,8 @@ static int select_energy_cpu_brute(struct task_struct *p, int prev_cpu, int sync
 			.util_delta     = task_util(p),
 			.src_cpu        = prev_cpu,
 			.dst_cpu        = target_cpu,
-			.task           = p,
-			.trg_cpu	= target_cpu,
+			.p              = p,
+			.trg_cpu        = target_cpu,
 		};
 
 
@@ -8601,6 +8590,15 @@ static inline void calculate_imbalance(struct lb_env *env, struct sd_lb_stats *s
 	local = &sds->local_stat;
 	busiest = &sds->busiest_stat;
 
+	if (busiest->group_type == group_imbalanced) {
+		/*
+		 * In the group_imb case we cannot rely on group-wide averages
+		 * to ensure cpu-load equilibrium, look at wider averages. XXX
+		 */
+		busiest->load_per_task =
+			min(busiest->load_per_task, sds->avg_load);
+	}
+
 	/*
 	 * In the presence of smp nice balancing, certain scenarios can have
 	 * max load less than avg load(as we skip the groups at or below
@@ -8711,7 +8709,8 @@ static struct sched_group *find_busiest_group(struct lb_env *env)
 	busiest = &sds.busiest_stat;
 
 	/* ASYM feature bypasses nice load balance check */
-	if (check_asym_packing(env, &sds))
+	if ((env->idle == CPU_IDLE || env->idle == CPU_NEWLY_IDLE) &&
+	    check_asym_packing(env, &sds))
 		return sds.busiest;
 
 	/* There is no busy sibling group to pull tasks from */
@@ -9401,8 +9400,18 @@ static int active_load_balance_cpu_stop(void *data)
 	int busiest_cpu = cpu_of(busiest_rq);
 	int target_cpu = busiest_rq->push_cpu;
 	struct rq *target_rq = cpu_rq(target_cpu);
-	struct sched_domain *sd;
+	struct sched_domain *sd = NULL;
 	struct task_struct *p = NULL;
+	struct task_struct *push_task = NULL;
+	int push_task_detached = 0;
+	struct lb_env env = {
+		.sd		= sd,
+		.dst_cpu	= target_cpu,
+		.dst_rq		= target_rq,
+		.src_cpu	= busiest_rq->cpu,
+		.src_rq		= busiest_rq,
+		.idle		= CPU_IDLE,
+	};
 
 	raw_spin_lock_irq(&busiest_rq->lock);
 
@@ -9422,6 +9431,17 @@ static int active_load_balance_cpu_stop(void *data)
 	 */
 	BUG_ON(busiest_rq == target_rq);
 
+	push_task = busiest_rq->push_task;
+	if (push_task) {
+		if (task_on_rq_queued(push_task) &&
+			task_cpu(push_task) == busiest_cpu &&
+					cpu_online(target_cpu)) {
+			detach_task(push_task, &env);
+			push_task_detached = 1;
+		}
+		goto out_unlock;
+	}
+
 	/* Search for an sd spanning us and the target CPU. */
 	rcu_read_lock();
 	for_each_domain(target_cpu, sd) {
@@ -9431,15 +9451,7 @@ static int active_load_balance_cpu_stop(void *data)
 	}
 
 	if (likely(sd)) {
-		struct lb_env env = {
-			.sd		= sd,
-			.dst_cpu	= target_cpu,
-			.dst_rq		= target_rq,
-			.src_cpu	= busiest_rq->cpu,
-			.src_rq		= busiest_rq,
-			.idle		= CPU_IDLE,
-		};
-
+		env.sd = sd;
 		schedstat_inc(sd, alb_count);
 		update_rq_clock(busiest_rq);
 
@@ -9457,7 +9469,17 @@ static int active_load_balance_cpu_stop(void *data)
 	rcu_read_unlock();
 out_unlock:
 	busiest_rq->active_balance = 0;
+
+	if (push_task)
+		busiest_rq->push_task = NULL;
+
 	raw_spin_unlock(&busiest_rq->lock);
+
+	if (push_task) {
+		if (push_task_detached)
+			attach_one_task(target_rq, push_task);
+		put_task_struct(push_task);
+	}
 
 	if (p)
 		attach_one_task(target_rq, p);
@@ -9921,6 +9943,47 @@ static void rq_offline_fair(struct rq *rq)
 
 	/* Ensure any throttled groups are reachable by pick_next_task */
 	unthrottle_offline_cfs_rqs(rq);
+}
+
+static inline int
+kick_active_balance(struct rq *rq, struct task_struct *p, int new_cpu)
+{
+	int rc = 0;
+
+	/* Invoke active balance to force migrate currently running task */
+	raw_spin_lock(&rq->lock);
+	if (!rq->active_balance) {
+		rq->active_balance = 1;
+		rq->push_cpu = new_cpu;
+		get_task_struct(p);
+		rq->push_task = p;
+		rc = 1;
+	}
+	raw_spin_unlock(&rq->lock);
+
+	return rc;
+}
+
+void check_for_migration(struct rq *rq, struct task_struct *p)
+{
+	int new_cpu;
+	int active_balance;
+	int cpu = task_cpu(p);
+
+	if (energy_aware() && rq->misfit_task) {
+		if (rq->curr->state != TASK_RUNNING ||
+		    rq->curr->nr_cpus_allowed == 1)
+			return;
+
+		new_cpu = select_energy_cpu_brute(p, cpu, 0);
+		if (capacity_orig_of(new_cpu) > capacity_orig_of(cpu)) {
+			active_balance = kick_active_balance(rq, p, new_cpu);
+			if (active_balance)
+				stop_one_cpu_nowait(cpu,
+						active_load_balance_cpu_stop,
+						rq, &rq->active_balance_work);
+		}
+	}
 }
 
 #endif /* CONFIG_SMP */
