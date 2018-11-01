@@ -38,7 +38,3 @@ static inline void boostbox_kick_max(unsigned int duration_ms)
 #endif
 
 #endif /* _boostbox_H_ */
-
-#ifdef CONFIG_DYNAMIC_STUNE_BOOST
-void dsb_audio_boost_kick(void);
-#endif /* CONFIG_DYNAMIC_STUNE_BOOST */

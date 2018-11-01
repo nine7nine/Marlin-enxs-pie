@@ -1,4 +1,4 @@
-/* Copyright (c) 2010-2011, 2016 The Linux Foundation. All rights reserved.
+/* Copyright (c) 2010-2011, 2016-2017 The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -32,7 +32,6 @@
 #if defined(CONFIG_MSM_QDSP6_APRV2_GLINK) || \
 	defined(CONFIG_MSM_QDSP6_APRV3_GLINK)
 #define APR_MAX_BUF			512
-#define APR_NUM_OF_TX_BUF		20
 #else
 #define APR_MAX_BUF			8092
 #endif
@@ -80,8 +79,6 @@ int apr_tal_rx_intents_config(struct apr_svc_ch_dev *apr_ch,
 	 defined(CONFIG_MSM_QDSP6_APRV3_GLINK)
 int apr_tal_start_rx_rt(struct apr_svc_ch_dev *apr_ch);
 int apr_tal_end_rx_rt(struct apr_svc_ch_dev *apr_ch);
-int apr_tal_start_tx_rt(struct apr_svc_ch_dev *apr_ch);
-int apr_tal_end_tx_rt(struct apr_svc_ch_dev *apr_ch);
 
 struct apr_svc_ch_dev {
 	void               *handle;
@@ -97,8 +94,6 @@ struct apr_svc_ch_dev {
 #else
 static inline int apr_tal_start_rx_rt(struct apr_svc_ch_dev *apr_ch) { return 0; }
 static inline int apr_tal_end_rx_rt(struct apr_svc_ch_dev *apr_ch) { return 0; }
-static inline int apr_tal_start_tx_rt(struct apr_svc_ch_dev *apr_ch) { return 0; }
-static inline int apr_tal_end_tx_rt(struct apr_svc_ch_dev *apr_ch) { return 0; }
 
 struct apr_svc_ch_dev {
 	struct smd_channel *ch;

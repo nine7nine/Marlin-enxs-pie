@@ -533,6 +533,52 @@ static DEVICE_ATTR_RO(dev);
 struct kset *devices_kset;
 
 /**
+ * devices_kset_move_before - Move device in the devices_kset's list.
+ * @deva: Device to move.
+ * @devb: Device @deva should come before.
+ */
+static void devices_kset_move_before(struct device *deva, struct device *devb)
+{
+	if (!devices_kset)
+		return;
+	pr_debug("devices_kset: Moving %s before %s\n",
+		 dev_name(deva), dev_name(devb));
+	spin_lock(&devices_kset->list_lock);
+	list_move_tail(&deva->kobj.entry, &devb->kobj.entry);
+	spin_unlock(&devices_kset->list_lock);
+}
+
+/**
+ * devices_kset_move_after - Move device in the devices_kset's list.
+ * @deva: Device to move
+ * @devb: Device @deva should come after.
+ */
+static void devices_kset_move_after(struct device *deva, struct device *devb)
+{
+	if (!devices_kset)
+		return;
+	pr_debug("devices_kset: Moving %s after %s\n",
+		 dev_name(deva), dev_name(devb));
+	spin_lock(&devices_kset->list_lock);
+	list_move(&deva->kobj.entry, &devb->kobj.entry);
+	spin_unlock(&devices_kset->list_lock);
+}
+
+/**
+ * devices_kset_move_last - move the device to the end of devices_kset's list.
+ * @dev: device to move
+ */
+void devices_kset_move_last(struct device *dev)
+{
+	if (!devices_kset)
+		return;
+	pr_debug("devices_kset: Moving %s to end of list\n", dev_name(dev));
+	spin_lock(&devices_kset->list_lock);
+	list_move_tail(&dev->kobj.entry, &devices_kset->list);
+	spin_unlock(&devices_kset->list_lock);
+}
+
+/**
  * device_create_file - create sysfs attribute file for device.
  * @dev: device.
  * @attr: device attribute descriptor.
@@ -785,8 +831,9 @@ static struct kobject *get_device_parent(struct device *dev,
 		return &parent->kobj;
 	return NULL;
 }
+
 static inline bool live_in_glue_dir(struct kobject *kobj,
-					struct device *dev)
+				    struct device *dev)
 {
 	if (!kobj || !dev->class ||
 	    kobj->kset != &dev->class->p->glue_dirs)
@@ -796,9 +843,7 @@ static inline bool live_in_glue_dir(struct kobject *kobj,
 
 static inline struct kobject *get_glue_dir(struct device *dev)
 {
-	if (live_in_glue_dir(&dev->kobj, dev))
-		return dev->kobj.parent;
-	return NULL;
+	return dev->kobj.parent;
 }
 /*
 * make sure cleaning up dir as the last step, we need to make
@@ -1037,18 +1082,6 @@ int device_add(struct device *dev)
 	if (error)
 		goto attrError;
 
-	if (MAJOR(dev->devt)) {
-		error = device_create_file(dev, &dev_attr_dev);
-		if (error)
-			goto ueventattrError;
-
-		error = device_create_sys_dev_entry(dev);
-		if (error)
-			goto devtattrError;
-
-		devtmpfs_create_node(dev);
-	}
-
 	error = device_add_class_symlinks(dev);
 	if (error)
 		goto SymlinkError;
@@ -1068,6 +1101,18 @@ int device_add(struct device *dev)
 		device_pm_add(dev);
 	}
 
+
+	if (MAJOR(dev->devt)) {
+		error = device_create_file(dev, &dev_attr_dev);
+		if (error)
+			goto DevAttrError;
+
+		error = device_create_sys_dev_entry(dev);
+		if (error)
+			goto SysEntryError;
+
+		devtmpfs_create_node(dev);
+	}
 
 	/* Notify clients of device addition.  This call must come
 	 * after dpm_sysfs_add() and before kobject_uevent().
@@ -1098,6 +1143,12 @@ int device_add(struct device *dev)
 done:
 	put_device(dev);
 	return error;
+ SysEntryError:
+	if (MAJOR(dev->devt))
+		device_remove_file(dev, &dev_attr_dev);
+ DevAttrError:
+	device_pm_remove(dev);
+	dpm_sysfs_remove(dev);
  DPMError:
 	bus_remove_device(dev);
  BusError:
@@ -1105,14 +1156,6 @@ done:
  AttrsError:
 	device_remove_class_symlinks(dev);
  SymlinkError:
-	if (MAJOR(dev->devt))
-		devtmpfs_delete_node(dev);
-	if (MAJOR(dev->devt))
-		device_remove_sys_dev_entry(dev);
- devtattrError:
-	if (MAJOR(dev->devt))
-		device_remove_file(dev, &dev_attr_dev);
- ueventattrError:
 	device_remove_file(dev, &dev_attr_uevent);
  attrError:
 	kobject_uevent(&dev->kobj, KOBJ_REMOVE);
@@ -1939,12 +1982,15 @@ int device_move(struct device *dev, struct device *new_parent,
 		break;
 	case DPM_ORDER_DEV_AFTER_PARENT:
 		device_pm_move_after(dev, new_parent);
+		devices_kset_move_after(dev, new_parent);
 		break;
 	case DPM_ORDER_PARENT_BEFORE_DEV:
 		device_pm_move_before(new_parent, dev);
+		devices_kset_move_before(new_parent, dev);
 		break;
 	case DPM_ORDER_DEV_LAST:
 		device_pm_move_last(dev);
+		devices_kset_move_last(dev);
 		break;
 	}
 

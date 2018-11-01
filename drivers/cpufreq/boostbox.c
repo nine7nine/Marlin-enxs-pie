@@ -39,31 +39,24 @@ unsigned int top;
 unsigned int rt;
 unsigned int gfx;
 unsigned int audio;
-static int boost_slot;
 
 /* Schedtune "floor" values */
 static int dsb_top_app_floor = 0;
 module_param(dsb_top_app_floor, uint, 0644);
-static int dsb_gfx_floor = 0;
+static int dsb_gfx_floor = 15;
 module_param(dsb_gfx_floor, uint, 0644);
-static int dsb_rt_floor = 0;
+static int dsb_rt_floor = 30;
 module_param(dsb_rt_floor, uint, 0644);
-static int dsb_audio_floor = 0;
-module_param(dsb_audio_floor, uint, 0644);
 
 /* Schedtune "boost" values  */
-static int dsb_max_boost = 40;
+static int dsb_max_boost = 50;
 module_param(dsb_max_boost, uint, 0644);
-static int dsb_top_app_boost = 30;
+static int dsb_top_app_boost = 40;
 module_param(dsb_top_app_boost, uint, 0644);
-static int dsb_gfx_boost = 20;
-module_param(dsb_gfx_boost, uint, 0644);
-static int dsb_rt_boost = 20;
+static int dsb_rt_boost = 35;
 module_param(dsb_rt_boost, uint, 0644);
-static int dsb_audio_boost = 6;
-module_param(dsb_audio_boost, uint, 0644);
-static int dsb_audio_boost_ms = 64;
-module_param(dsb_audio_boost_ms, uint, 0644);
+static int dsb_gfx_boost = 25;
+module_param(dsb_gfx_boost, uint, 0644);
 #endif /* CONFIG_DYNAMIC_STUNE_BOOST */
 
 // boost cpu frequencies
@@ -75,12 +68,12 @@ module_param(sx_perf_min_boost, uint, 0644);
 static int sx_gfx_boost_ms = 64;
 static int sx_wake_boost_ms = 1000;
 module_param(sx_wake_boost_ms, uint, 0644);
-static int sx_app_launch_boost_ms = 1000;
+static int sx_app_launch_boost_ms = 1500;
 module_param(sx_app_launch_boost_ms, uint, 0644);
-static int sx_top_app_boost_ms = 1000;
-module_param(sx_top_app_boost_ms, uint, 0644);
-static int sx_rt_boost_ms = 1000;
+static int sx_rt_boost_ms = 1800;
 module_param(sx_rt_boost_ms, uint, 0644);
+static int sx_top_app_boost_ms = 120;
+module_param(sx_top_app_boost_ms, uint, 0644);
 
 struct boost_drv {
 	struct workqueue_struct *wq;
@@ -88,8 +81,6 @@ struct boost_drv {
 	struct delayed_work max_unboost;
 	struct work_struct gfx_boost;
 	struct delayed_work gfx_unboost;
-	struct work_struct audio_boost;
-	struct delayed_work audio_unboost;
 	struct work_struct top_app_boost;
 	struct delayed_work top_app_unboost;
 	struct work_struct rt_boost;
@@ -153,26 +144,21 @@ static void update_online_cpu_policy(void)
 static void unboost_all_cpus(struct boost_drv *b)
 {
 	if (!cancel_delayed_work_sync(&b->gfx_unboost) &&
-	    !cancel_delayed_work_sync(&b->top_app_unboost) &&
-	    !cancel_delayed_work_sync(&b->rt_unboost) &&
 		!cancel_delayed_work_sync(&b->max_unboost))
 		return;
+ 
+#ifdef CONFIG_DYNAMIC_STUNE_BOOST
+	/* Reset dynamic stune boost value to the default value */
+	do_stune_unboost("top-app", dsb_top_app_floor);
+	do_stune_unboost("gfx", dsb_gfx_floor);
+	do_stune_unboost("rt", dsb_rt_floor);
+#endif /* CONFIG_DYNAMIC_STUNE_BOOST */
 
-	clear_boost_bit(b, WAKE_BOOST | MAX_BOOST);
+	clear_boost_bit(b, WAKE_BOOST | MAX_BOOST | GFX_BOOST | TOP_APP_BOOST | RT_BOOST);
 	update_online_cpu_policy();
 }
 
 #ifdef CONFIG_DYNAMIC_STUNE_BOOST
-void dsb_audio_boost_kick(void)
-{
-	struct boost_drv *b = boost_drv_g;
-
-	if (!b)
-		return;
-
-	queue_work(b->wq, &b->audio_boost);
-}
-
 void boostbox_rt_kick(void)
 {
 	struct boost_drv *b = boost_drv_g;
@@ -219,6 +205,13 @@ static void __boostbox_kick_max(struct boost_drv *b,
 	b->max_boost_expires = new_expires;
 	spin_unlock(&b->lock);
 
+#ifdef CONFIG_DYNAMIC_STUNE_BOOST
+	/* Set dynamic stune boost value */
+	do_stune_boost("top-app", dsb_max_boost);
+	do_stune_boost("rt", dsb_rt_boost);
+	do_stune_boost("gfx", dsb_gfx_boost);
+#endif /* CONFIG_DYNAMIC_STUNE_BOOST */
+
 	atomic_set(&b->max_boost_dur, duration_ms);
 	queue_work(b->wq, &b->max_boost);
 }
@@ -242,6 +235,12 @@ static void max_boost_worker(struct work_struct *work)
 		update_online_cpu_policy();
 	}
 
+#ifdef CONFIG_DYNAMIC_STUNE_BOOST
+	/* Set dynamic stune boost value */
+	do_stune_boost("top-app", dsb_max_boost);
+	do_stune_boost("rt", dsb_rt_boost);
+#endif /* CONFIG_DYNAMIC_STUNE_BOOST */
+
 	queue_delayed_work(b->wq, &b->max_unboost,
 		msecs_to_jiffies(atomic_read(&b->max_boost_dur)));
 }
@@ -251,7 +250,13 @@ static void max_unboost_worker(struct work_struct *work)
 	struct boost_drv *b =
 		container_of(to_delayed_work(work), typeof(*b), max_unboost);
 
-	clear_boost_bit(b, WAKE_BOOST | MAX_BOOST);
+#ifdef CONFIG_DYNAMIC_STUNE_BOOST
+	/* Set dynamic stune boost value */
+	do_stune_unboost("top-app", dsb_top_app_floor);
+	do_stune_unboost("rt", dsb_rt_floor);
+#endif /* CONFIG_DYNAMIC_STUNE_BOOST */
+
+	clear_boost_bit(b, WAKE_BOOST | MAX_BOOST | TOP_APP_BOOST | RT_BOOST);
 	update_online_cpu_policy();
 }
 
@@ -266,7 +271,7 @@ static void gfx_boost_worker(struct work_struct *work)
 
 #ifdef CONFIG_DYNAMIC_STUNE_BOOST
 	/* Set dynamic stune boost value */
-	do_stune_boost("gfx", dsb_gfx_boost, &boost_slot);
+	do_stune_boost("gfx", dsb_gfx_boost);
 #endif /* CONFIG_DYNAMIC_STUNE_BOOST */
 
 	queue_delayed_work(b->wq, &b->gfx_unboost,
@@ -280,42 +285,10 @@ static void gfx_unboost_worker(struct work_struct *work)
 
 #ifdef CONFIG_DYNAMIC_STUNE_BOOST
 	/* Reset dynamic stune boost value to the default value */
-	do_stune_unboost("gfx", dsb_gfx_floor, &boost_slot);
+	do_stune_unboost("gfx", dsb_gfx_floor);
 #endif /* CONFIG_DYNAMIC_STUNE_BOOST */
 
 	clear_boost_bit(b, GFX_BOOST);
-	update_online_cpu_policy();
-}
-
-static void audio_boost_worker(struct work_struct *work)
-{
-	struct boost_drv *b = container_of(work, typeof(*b), audio_boost);
-
-	if (!cancel_delayed_work_sync(&b->audio_unboost)) {
-		set_boost_bit(b, AUDIO_BOOST);
-		update_online_cpu_policy();
-	}
-
-#ifdef CONFIG_DYNAMIC_STUNE_BOOST
-	/* Set dynamic stune boost value */
-	do_stune_boost("audio", dsb_audio_boost, &boost_slot);
-#endif /* CONFIG_DYNAMIC_STUNE_BOOST */
-
-	queue_delayed_work(b->wq, &b->audio_unboost,
-		msecs_to_jiffies(dsb_audio_boost_ms));
-}
-
-static void audio_unboost_worker(struct work_struct *work)
-{
-	struct boost_drv *b =
-		container_of(to_delayed_work(work), typeof(*b), audio_unboost);
-
-#ifdef CONFIG_DYNAMIC_STUNE_BOOST
-	/* Set dynamic stune boost value */
-	do_stune_unboost("audio", dsb_audio_floor, &boost_slot);
-#endif /* CONFIG_DYNAMIC_STUNE_BOOST */
-
-	clear_boost_bit(b, AUDIO_BOOST);
 	update_online_cpu_policy();
 }
 
@@ -330,7 +303,7 @@ static void top_app_boost_worker(struct work_struct *work)
 
 #ifdef CONFIG_DYNAMIC_STUNE_BOOST
 	/* Reset dynamic stune boost value to the default value */
-	do_stune_boost("top-app", dsb_top_app_boost, &boost_slot);
+	do_stune_boost("top-app", dsb_top_app_boost);
 #endif /* CONFIG_DYNAMIC_STUNE_BOOST */
 
 	queue_delayed_work(b->wq, &b->top_app_unboost,
@@ -343,7 +316,7 @@ static void top_app_unboost_worker(struct work_struct *work)
 		container_of(to_delayed_work(work), typeof(*b), top_app_unboost);
 
 #ifdef CONFIG_DYNAMIC_STUNE_BOOST
-	do_stune_unboost("top-app", dsb_top_app_floor, &boost_slot);
+	do_stune_unboost("top-app", dsb_top_app_floor);
 #endif /* CONFIG_DYNAMIC_STUNE_BOOST */
 
 	clear_boost_bit(b, TOP_APP_BOOST);
@@ -361,7 +334,7 @@ static void rt_boost_worker(struct work_struct *work)
 
 #ifdef CONFIG_DYNAMIC_STUNE_BOOST
 	/* Reset dynamic stune boost value to the default value */
-	do_stune_boost("rt", dsb_rt_boost, &boost_slot);
+	do_stune_boost("rt", dsb_rt_boost);
 #endif /* CONFIG_DYNAMIC_STUNE_BOOST */
 
 	queue_delayed_work(b->wq, &b->rt_unboost,
@@ -374,7 +347,7 @@ static void rt_unboost_worker(struct work_struct *work)
 		container_of(to_delayed_work(work), typeof(*b), rt_unboost);
 
 #ifdef CONFIG_DYNAMIC_STUNE_BOOST
-	do_stune_unboost("rt", dsb_rt_floor, &boost_slot);
+	do_stune_unboost("rt", dsb_rt_floor);
 #endif /* CONFIG_DYNAMIC_STUNE_BOOST */
 
 	clear_boost_bit(b, RT_BOOST);
@@ -559,8 +532,6 @@ static int __init boostbox_init(void)
 	INIT_DELAYED_WORK(&b->max_unboost, max_unboost_worker);
 	INIT_WORK(&b->gfx_boost, gfx_boost_worker);
 	INIT_DELAYED_WORK(&b->gfx_unboost, gfx_unboost_worker);
-	INIT_WORK(&b->audio_boost, audio_boost_worker);
-	INIT_DELAYED_WORK(&b->audio_unboost, audio_unboost_worker);
 	INIT_WORK(&b->top_app_boost, top_app_boost_worker);
 	INIT_DELAYED_WORK(&b->top_app_unboost, top_app_unboost_worker);
 	INIT_WORK(&b->rt_boost, rt_boost_worker);
