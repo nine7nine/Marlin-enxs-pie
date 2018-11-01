@@ -3014,6 +3014,7 @@ update_cfs_rq_load_avg(u64 now, struct cfs_rq *cfs_rq, bool update_freq)
  */
 #define UPDATE_TG	0x1
 #define SKIP_AGE_LOAD	0x2
+#define SKIP_CPUFREQ	0x4
 
 /* Update task and its cfs_rq load average */
 static inline void update_load_avg(struct sched_entity *se, int flags)
@@ -3034,7 +3035,7 @@ static inline void update_load_avg(struct sched_entity *se, int flags)
 			  cfs_rq->curr == se, NULL);
 	}
 
-	decayed  = update_cfs_rq_load_avg(now, cfs_rq, true);
+	decayed  = update_cfs_rq_load_avg(now, cfs_rq, !(flags & SKIP_CPUFREQ));
 	decayed |= propagate_entity_load_avg(se);
 
 	if (decayed && (flags & UPDATE_TG))
@@ -3205,6 +3206,7 @@ update_cfs_rq_load_avg(u64 now, struct cfs_rq *cfs_rq, bool update_freq)
 
 #define UPDATE_TG	0x0
 #define SKIP_AGE_LOAD	0x0
+#define SKIP_CPUFREQ	0x0
 
 static inline void update_load_avg(struct sched_entity *se, int not_used1){}
 static inline void
@@ -3445,6 +3447,8 @@ static __always_inline void return_cfs_rq_runtime(struct cfs_rq *cfs_rq);
 static void
 dequeue_entity(struct cfs_rq *cfs_rq, struct sched_entity *se, int flags)
 {
+	int update_flags;
+
 	/*
 	 * Update run-time statistics of the 'current'.
 	 */
@@ -3458,7 +3462,12 @@ dequeue_entity(struct cfs_rq *cfs_rq, struct sched_entity *se, int flags)
 	 *   - For group entity, update its weight to reflect the new share
 	 *     of its group cfs_rq.
 	 */
-	update_load_avg(se, UPDATE_TG);
+	update_flags = UPDATE_TG;
+
+	if (flags & DEQUEUE_IDLE)
+		update_flags |= SKIP_CPUFREQ;
+
+	update_load_avg(se, update_flags);
 	dequeue_entity_load_avg(cfs_rq, se);
 
 	if (schedstat_enabled())
@@ -4552,6 +4561,25 @@ enqueue_task_fair(struct rq *rq, struct task_struct *p, int flags)
 #ifdef CONFIG_SMP
 	int task_new = flags & ENQUEUE_WAKEUP_NEW;
 	int task_wakeup = flags & ENQUEUE_WAKEUP;
+
+	/*
+	 * Update SchedTune accounting.
+	 *
+	 * We do it before updating the CPU capacity to ensure the
+	 * boost value of the current task is accounted for in the
+	 * selection of the OPP.
+	 *
+	 * We do it also in the case where we enqueue a throttled task;
+	 * we could argue that a throttled task should not boost a CPU,
+	 * however:
+	 * a) properly implementing CPU boosting considering throttled
+	 *    tasks will increase a lot the complexity of the solution
+	 * b) it's not easy to quantify the benefits introduced by
+	 *    such a more complex solution.
+	 * Thus, for the time being we go for the simple solution and boost
+	 * also for throttled RQs.
+	 */
+	schedtune_enqueue_task(p, cpu_of(rq));
 #endif
 
 	/*
@@ -4598,26 +4626,6 @@ enqueue_task_fair(struct rq *rq, struct task_struct *p, int flags)
 		add_nr_running(rq, 1);
 
 #ifdef CONFIG_SMP
-
-	/*
-	 * Update SchedTune accounting.
-	 *
-	 * We do it before updating the CPU capacity to ensure the
-	 * boost value of the current task is accounted for in the
-	 * selection of the OPP.
-	 *
-	 * We do it also in the case where we enqueue a throttled task;
-	 * we could argue that a throttled task should not boost a CPU,
-	 * however:
-	 * a) properly implementing CPU boosting considering throttled
-	 *    tasks will increase a lot the complexity of the solution
-	 * b) it's not easy to quantify the benefits introduced by
-	 *    such a more complex solution.
-	 * Thus, for the time being we go for the simple solution and boost
-	 * also for throttled RQs.
-	 */
-	schedtune_enqueue_task(p, cpu_of(rq));
-
 	if (!se) {
 		walt_inc_cumulative_runnable_avg(rq, p);
 		if (!task_new && !rq->rd->overutilized &&
@@ -4654,6 +4662,20 @@ static void dequeue_task_fair(struct rq *rq, struct task_struct *p, int flags)
 	struct sched_entity *se = &p->se;
 	int task_sleep = flags & DEQUEUE_SLEEP;
 
+	if (task_sleep && rq->nr_running == 1)
+		flags |= DEQUEUE_IDLE;
+
+#ifdef CONFIG_SMP
+	/*
+	 * Update SchedTune accounting
+	 *
+	 * We do it before updating the CPU capacity to ensure the
+	 * boost value of the current task is accounted for in the
+	 * selection of the OPP.
+	 */
+	schedtune_dequeue_task(p, cpu_of(rq));
+#endif
+
 	for_each_sched_entity(se) {
 		cfs_rq = cfs_rq_of(se);
 		dequeue_entity(cfs_rq, se, flags);
@@ -4685,6 +4707,8 @@ static void dequeue_task_fair(struct rq *rq, struct task_struct *p, int flags)
 	}
 
 	for_each_sched_entity(se) {
+		int update_flags;
+
 		cfs_rq = cfs_rq_of(se);
 		cfs_rq->h_nr_running--;
 		walt_dec_cfs_cumulative_runnable_avg(cfs_rq, p);
@@ -4692,7 +4716,12 @@ static void dequeue_task_fair(struct rq *rq, struct task_struct *p, int flags)
 		if (cfs_rq_throttled(cfs_rq))
 			break;
 
-		update_load_avg(se, UPDATE_TG);
+		update_flags = UPDATE_TG;
+
+		if (flags & DEQUEUE_IDLE)
+			update_flags |= SKIP_CPUFREQ;
+
+		update_load_avg(se, update_flags);
 		update_cfs_shares(se);
 	}
 
@@ -4700,16 +4729,6 @@ static void dequeue_task_fair(struct rq *rq, struct task_struct *p, int flags)
 		sub_nr_running(rq, 1);
 
 #ifdef CONFIG_SMP
-
-	/*
-	 * Update SchedTune accounting
-	 *
-	 * We do it before updating the CPU capacity to ensure the
-	 * boost value of the current task is accounted for in the
-	 * selection of the OPP.
-	 */
-	schedtune_dequeue_task(p, cpu_of(rq));
-
 	if (!se) {
 		walt_dec_cumulative_runnable_avg(rq, p);
 
@@ -6205,13 +6224,11 @@ static int start_cpu(bool boosted)
 static inline int find_best_target(struct task_struct *p, int *backup_cpu,
 				   bool boosted, bool prefer_idle)
 {
-	unsigned long best_idle_min_cap_orig = ULONG_MAX;
 	unsigned long min_util = boosted_task_util(p);
 	unsigned long target_capacity = ULONG_MAX;
 	unsigned long min_wake_util = ULONG_MAX;
 	unsigned long target_max_spare_cap = 0;
 	unsigned long best_active_util = ULONG_MAX;
-	unsigned long target_idle_max_spare_cap = 0;
 	int best_idle_cstate = INT_MAX;
 	struct sched_domain *sd;
 	struct sched_group *sg;
@@ -6247,7 +6264,7 @@ static inline int find_best_target(struct task_struct *p, int *backup_cpu,
 		for_each_cpu_and(i, tsk_cpus_allowed(p), sched_group_cpus(sg)) {
 			unsigned long capacity_curr = capacity_curr_of(i);
 			unsigned long capacity_orig = capacity_orig_of(i);
-			unsigned long wake_util, new_util, min_capped_util;
+			unsigned long wake_util, new_util;
 
 			if (!cpu_online(i))
 				continue;
@@ -6269,16 +6286,6 @@ static inline int find_best_target(struct task_struct *p, int *backup_cpu,
 			 * than the one required to boost the task.
 			 */
 			new_util = max(min_util, new_util);
-
-			/*
-			 * Include minimum capacity constraint:
-			 * new_util contains the required utilization including
-			 * boost. min_capped_util also takes into account a
-			 * minimum capacity cap imposed on the CPU by external
-			 * actors.
-			 */
-			min_capped_util = max(new_util, capacity_min_of(i));
-
 			if (new_util > capacity_orig)
 				continue;
 
@@ -6372,6 +6379,13 @@ static inline int find_best_target(struct task_struct *p, int *backup_cpu,
 				continue;
 
 			/*
+			 * Favor CPUs with smaller capacity for Non latency
+			 * sensitive tasks.
+			 */
+			if (capacity_orig > target_capacity)
+				continue;
+
+			/*
 			 * Case B) Non latency sensitive tasks on IDLE CPUs.
 			 *
 			 * Find an optimal backup IDLE CPU for non latency
@@ -6398,16 +6412,6 @@ static inline int find_best_target(struct task_struct *p, int *backup_cpu,
 			if (idle_cpu(i)) {
 				int idle_idx = idle_get_state_idx(cpu_rq(i));
 
-				/* Select idle CPU with lower cap_orig */
-				if (capacity_orig > best_idle_min_cap_orig)
-					continue;
-				/* Favor CPUs that won't end up running at a
-				 * high OPP.
-				 */
-				if ((capacity_orig - min_capped_util) <
-					target_idle_max_spare_cap)
-					continue;
-
 				/*
 				 * Skip CPUs in deeper idle state, but only
 				 * if they are also less energy efficient.
@@ -6419,9 +6423,7 @@ static inline int find_best_target(struct task_struct *p, int *backup_cpu,
 					continue;
 
 				/* Keep track of best idle CPU */
-				best_idle_min_cap_orig = capacity_orig;
-				target_idle_max_spare_cap = capacity_orig -
-							    min_capped_util;
+				target_capacity = capacity_orig;
 				best_idle_cstate = idle_idx;
 				best_idle_cpu = i;
 				continue;
@@ -6447,16 +6449,11 @@ static inline int find_best_target(struct task_struct *p, int *backup_cpu,
 			 * capacity.
 			 */
 
-			/* Favor CPUs with smaller capacity */
-			if (capacity_orig > target_capacity)
-				continue;
-
 			/* Favor CPUs with maximum spare capacity */
-			if ((capacity_orig - min_capped_util) <
-				target_max_spare_cap)
+			if ((capacity_orig - new_util) < target_max_spare_cap)
 				continue;
 
-			target_max_spare_cap = capacity_orig - min_capped_util;
+			target_max_spare_cap = capacity_orig - new_util;
 			target_capacity = capacity_orig;
 			target_cpu = i;
 		}
