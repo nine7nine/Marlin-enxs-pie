@@ -1230,6 +1230,10 @@ int smp_conn_security(struct hci_conn *hcon, __u8 sec_level)
 		return 1;
 
 	chan = conn->smp;
+	if (!chan) {
+		BT_ERR("SMP security requested but not available");
+		return 1;
+	}
 
 	if (!test_bit(HCI_LE_ENABLED, &hcon->hdev->dev_flags))
 		return 1;
