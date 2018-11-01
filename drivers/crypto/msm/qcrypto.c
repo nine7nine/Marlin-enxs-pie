@@ -1662,7 +1662,7 @@ static void req_done(struct qcrypto_req_control *pqcrypto_req_control)
 	}
 	if (areq)
 		_qcrypto_tfm_complete(pengine, type, tfm_ctx, arsp, res);
-	if (ACCESS_ONCE(cp->ce_req_proc_sts) == IN_PROGRESS)
+	if (READ_ONCE(cp->ce_req_proc_sts) == IN_PROGRESS)
 		_start_qcrypto_process(cp, pengine);
 }
 
@@ -2368,7 +2368,7 @@ static int _start_qcrypto_process(struct crypto_priv *cp,
 	struct qcrypto_req_control *pqcrypto_req_control;
 	unsigned int cpu = MAX_SMP_CPU;
 
-	if (ACCESS_ONCE(cp->ce_req_proc_sts) == STOPPED)
+	if (READ_ONCE(cp->ce_req_proc_sts) == STOPPED)
 		return 0;
 
 	if (in_interrupt()) {
@@ -2592,7 +2592,7 @@ static int _qcrypto_queue_req(struct crypto_priv *cp,
 		cp->no_avail++;
 	}
 	spin_unlock_irqrestore(&cp->lock, flags);
-	if (pengine && (ACCESS_ONCE(cp->ce_req_proc_sts) == IN_PROGRESS))
+	if (pengine && (READ_ONCE(cp->ce_req_proc_sts) == IN_PROGRESS))
 		_start_qcrypto_process(cp, pengine);
 	return ret;
 }
@@ -3437,10 +3437,9 @@ static int _qcrypto_aead_aes_192_fallback(struct aead_request *req,
 	rctx->fb_aes_dst = req->dst;
 	rctx->fb_aes_cryptlen = nbytes;
 	rctx->ivsize = crypto_aead_ivsize(aead_tfm);
-	rctx->fb_aes_iv = kzalloc(rctx->ivsize, GFP_ATOMIC);
+	rctx->fb_aes_iv = kmemdup(req->iv, rctx->ivsize, GFP_ATOMIC);
 	if (!rctx->fb_aes_iv)
 		goto ret;
-	memcpy(rctx->fb_aes_iv, req->iv, rctx->ivsize);
 	ablkcipher_request_set_crypt(aes_req, rctx->fb_aes_src,
 					rctx->fb_aes_dst,
 					rctx->fb_aes_cryptlen, rctx->fb_aes_iv);
