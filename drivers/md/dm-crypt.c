@@ -140,7 +140,7 @@ struct crypt_config {
 	char *cipher;
 	char *cipher_string;
 
-	struct crypt_iv_operations *iv_gen_ops;
+	const struct crypt_iv_operations *iv_gen_ops;
 	union {
 		struct iv_essiv_private essiv;
 		struct iv_benbi_private benbi;
@@ -755,15 +755,15 @@ static int crypt_iv_tcw_post(struct crypt_config *cc, u8 *iv,
 	return r;
 }
 
-static struct crypt_iv_operations crypt_iv_plain_ops = {
+static const struct crypt_iv_operations crypt_iv_plain_ops = {
 	.generator = crypt_iv_plain_gen
 };
 
-static struct crypt_iv_operations crypt_iv_plain64_ops = {
+static const struct crypt_iv_operations crypt_iv_plain64_ops = {
 	.generator = crypt_iv_plain64_gen
 };
 
-static struct crypt_iv_operations crypt_iv_essiv_ops = {
+static const struct crypt_iv_operations crypt_iv_essiv_ops = {
 	.ctr       = crypt_iv_essiv_ctr,
 	.dtr       = crypt_iv_essiv_dtr,
 	.init      = crypt_iv_essiv_init,
@@ -771,17 +771,17 @@ static struct crypt_iv_operations crypt_iv_essiv_ops = {
 	.generator = crypt_iv_essiv_gen
 };
 
-static struct crypt_iv_operations crypt_iv_benbi_ops = {
+static const struct crypt_iv_operations crypt_iv_benbi_ops = {
 	.ctr	   = crypt_iv_benbi_ctr,
 	.dtr	   = crypt_iv_benbi_dtr,
 	.generator = crypt_iv_benbi_gen
 };
 
-static struct crypt_iv_operations crypt_iv_null_ops = {
+static const struct crypt_iv_operations crypt_iv_null_ops = {
 	.generator = crypt_iv_null_gen
 };
 
-static struct crypt_iv_operations crypt_iv_lmk_ops = {
+static const struct crypt_iv_operations crypt_iv_lmk_ops = {
 	.ctr	   = crypt_iv_lmk_ctr,
 	.dtr	   = crypt_iv_lmk_dtr,
 	.init	   = crypt_iv_lmk_init,
@@ -790,7 +790,7 @@ static struct crypt_iv_operations crypt_iv_lmk_ops = {
 	.post	   = crypt_iv_lmk_post
 };
 
-static struct crypt_iv_operations crypt_iv_tcw_ops = {
+static const struct crypt_iv_operations crypt_iv_tcw_ops = {
 	.ctr	   = crypt_iv_tcw_ctr,
 	.dtr	   = crypt_iv_tcw_dtr,
 	.init	   = crypt_iv_tcw_init,
@@ -1449,7 +1449,7 @@ static int crypt_alloc_tfms(struct crypt_config *cc, char *ciphermode)
 	return 0;
 }
 
-static int crypt_setkey_allcpus(struct crypt_config *cc)
+static int crypt_setkey(struct crypt_config *cc)
 {
 	unsigned subkey_size;
 	int err = 0, i, r;
@@ -1487,7 +1487,7 @@ static int crypt_set_key(struct crypt_config *cc, char *key)
 	if (cc->key_size && crypt_decode_key(cc->key, key, cc->key_size) < 0)
 		goto out;
 
-	r = crypt_setkey_allcpus(cc);
+	r = crypt_setkey(cc);
 	if (!r)
 		set_bit(DM_CRYPT_KEY_VALID, &cc->flags);
 
@@ -1503,7 +1503,7 @@ static int crypt_wipe_key(struct crypt_config *cc)
 	clear_bit(DM_CRYPT_KEY_VALID, &cc->flags);
 	memset(&cc->key, 0, cc->key_size * sizeof(u8));
 
-	return crypt_setkey_allcpus(cc);
+	return crypt_setkey(cc);
 }
 
 static void crypt_dtr(struct dm_target *ti)

@@ -402,7 +402,7 @@ static inline bool cmpxchg_double_slab(struct kmem_cache *s, struct page *page,
 		if (cmpxchg_double(&page->freelist, &page->counters,
 				   freelist_old, counters_old,
 				   freelist_new, counters_new))
-			return 1;
+			return true;
 	} else
 #endif
 	{
@@ -429,7 +429,7 @@ static inline bool cmpxchg_double_slab(struct kmem_cache *s, struct page *page,
 	pr_info("%s %s: cmpxchg double redo ", n, s->name);
 #endif
 
-	return 0;
+	return false;
 }
 
 #ifdef CONFIG_SLUB_DEBUG
@@ -3566,7 +3566,7 @@ static int slab_mem_going_offline_callback(void *arg)
 		__kmem_cache_shrink(s);
 	mutex_unlock(&slab_mutex);
 
-	return 0;
+	return false;
 }
 
 static void slab_mem_offline_callback(void *arg)
