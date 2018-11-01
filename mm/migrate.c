@@ -932,7 +932,8 @@ out:
 static ICE_noinline int unmap_and_move(new_page_t get_new_page,
 				   free_page_t put_new_page,
 				   unsigned long private, struct page *page,
-				   int force, enum migrate_mode mode)
+				   int force, enum migrate_mode mode,
+				   enum migrate_reason reason)
 {
 	int rc = 0;
 	int *result = NULL;
@@ -963,7 +964,8 @@ out:
 		list_del(&page->lru);
 		dec_zone_page_state(page, NR_ISOLATED_ANON +
 				page_is_file_cache(page));
-		putback_lru_page(page);
+		if (reason != MR_MEMORY_FAILURE)
+			putback_lru_page(page);
 	}
 
 	/*
@@ -1138,7 +1140,8 @@ int migrate_pages(struct list_head *from, new_page_t get_new_page,
 						pass > 2, mode);
 			else
 				rc = unmap_and_move(get_new_page, put_new_page,
-						private, page, pass > 2, mode);
+						private, page, pass > 2, mode,
+						reason);
 
 			switch(rc) {
 			case -ENOMEM:
@@ -1235,7 +1238,9 @@ static int do_move_page_to_node_array(struct mm_struct *mm,
 		if (!vma || pp->addr < vma->vm_start || !vma_migratable(vma))
 			goto set_status;
 
-		page = follow_page(vma, pp->addr, FOLL_GET|FOLL_SPLIT);
+		/* FOLL_DUMP to ignore special (like zero) pages */
+		page = follow_page(vma, pp->addr,
+				FOLL_GET | FOLL_SPLIT | FOLL_DUMP);
 
 		err = PTR_ERR(page);
 		if (IS_ERR(page))
@@ -1244,10 +1249,6 @@ static int do_move_page_to_node_array(struct mm_struct *mm,
 		err = -ENOENT;
 		if (!page)
 			goto set_status;
-
-		/* Use PageReserved to check for zero page */
-		if (PageReserved(page))
-			goto put_and_set;
 
 		pp->page = page;
 		err = page_to_nid(page);
@@ -1405,18 +1406,14 @@ static void do_pages_stat_array(struct mm_struct *mm, unsigned long nr_pages,
 		if (!vma || addr < vma->vm_start)
 			goto set_status;
 
-		page = follow_page(vma, addr, 0);
+		/* FOLL_DUMP to ignore special (like zero) pages */
+		page = follow_page(vma, addr, FOLL_DUMP);
 
 		err = PTR_ERR(page);
 		if (IS_ERR(page))
 			goto set_status;
 
-		err = -ENOENT;
-		/* Use PageReserved to check for zero page */
-		if (!page || PageReserved(page))
-			goto set_status;
-
-		err = page_to_nid(page);
+		err = page ? page_to_nid(page) : -ENOENT;
 set_status:
 		*status = err;
 

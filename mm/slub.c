@@ -3749,6 +3749,7 @@ void __init kmem_cache_init(void)
 	kmem_cache_node = bootstrap(&boot_kmem_cache_node);
 
 	/* Now we can use the kmem_cache to allocate kmalloc slabs */
+	setup_kmalloc_cache_index_table();
 	create_kmalloc_caches(0);
 
 #ifdef CONFIG_SMP
@@ -4336,7 +4337,7 @@ static ssize_t show_slab_objects(struct kmem_cache *s,
 			int node;
 			struct page *page;
 
-			page = ACCESS_ONCE(c->page);
+			page = READ_ONCE(c->page);
 			if (!page)
 				continue;
 
@@ -4351,7 +4352,7 @@ static ssize_t show_slab_objects(struct kmem_cache *s,
 			total += x;
 			nodes[node] += x;
 
-			page = ACCESS_ONCE(c->partial);
+			page = READ_ONCE(c->partial);
 			if (page) {
 				node = page_to_nid(page);
 				if (flags & SO_TOTAL)
