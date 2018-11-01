@@ -96,6 +96,7 @@
 #include <linux/freezer.h>
 #include <linux/fs.h>
 #include <linux/list.h>
+#include <linux/llist.h>
 #include <linux/miscdevice.h>
 #include <linux/module.h>
 #include <linux/mutex.h>
@@ -134,7 +135,6 @@ static DEFINE_SPINLOCK(binder_dead_nodes_lock);
 static struct dentry *binder_debugfs_dir_entry_root;
 static struct dentry *binder_debugfs_dir_entry_proc;
 static atomic_t binder_last_id;
-static struct workqueue_struct *binder_deferred_workqueue;
 
 #define BINDER_DEBUG_ENTRY(name) \
 static int binder_##name##_open(struct inode *inode, struct file *file) \
@@ -165,6 +165,57 @@ BINDER_DEBUG_ENTRY(proc);
 #define FORBIDDEN_MMAP_FLAGS                (VM_WRITE)
 
 #define BINDER_SMALL_BUF_SIZE (PAGE_SIZE * 64)
+
+/*
+ * llist extension to allow lockless addition of an entry only if it's
+ * not on any other list
+ */
+#define LLIST_NODE_UNLISTED	((void *)(-1L))
+#define LLIST_NODE_INIT(name)	{ LLIST_NODE_UNLISTED }
+#define LLIST_NODE(name)	struct llist_node name = LLIST_NODE_INIT(name)
+
+static inline void INIT_LLIST_NODE(struct llist_node *node)
+{
+	WRITE_ONCE(node->next, LLIST_NODE_UNLISTED);
+}
+
+/**
+ * llist_del_first_exclusive - delete the first entry of lock-less list
+ * 			       and make sure it's marked as UNLISTED
+ * @head:	the head for your lock-less list
+ *
+ * If list is empty, return NULL, otherwise, return the first entry
+ * deleted, this is the newest added one.
+ *
+ */
+static inline struct llist_node *llist_del_first_exclusive(
+				struct llist_head *head)
+{
+	struct llist_node *node = llist_del_first(head);
+
+	if (READ_ONCE(node))
+		smp_store_release(&node->next, LLIST_NODE_UNLISTED);
+	return node;
+}
+
+/**
+ * llist_add_exclusive - add a node only if it's not on any list
+			 (i. e. marked as UNLISTED)
+ * @node:	the node to be added
+ * @head:	the head for your lock-less list
+ *
+ * Return true if the node was added, or false otherwise.
+ */
+static inline bool llist_add_exclusive(struct llist_node *node,
+					struct llist_head *head)
+{
+	if (cmpxchg(&node->next, LLIST_NODE_UNLISTED, NULL) !=
+				LLIST_NODE_UNLISTED)
+		return false;
+
+	llist_add(node, head);
+	return true;
+}
 
 enum {
 	BINDER_DEBUG_USER_ERROR             = 1U << 0,
@@ -547,9 +598,7 @@ struct binder_priority {
  * @tsk                   task_struct for group_leader of process
  *                        (invariant after initialized)
  * @deferred_work_node:   element for binder_deferred_list
- *                        (protected by binder_deferred_lock)
  * @deferred_work:        bitmap of deferred work to perform
- *                        (protected by binder_deferred_lock)
  * @is_dead:              process is dead and awaiting free
  *                        when outstanding transactions are cleaned up
  *                        (protected by @inner_lock)
@@ -592,8 +641,8 @@ struct binder_proc {
 	struct list_head waiting_threads;
 	int pid;
 	struct task_struct *tsk;
-	struct hlist_node deferred_work_node;
-	int deferred_work;
+	struct llist_node deferred_work_node;
+	atomic_t deferred_work;
 	bool is_dead;
 
 	struct list_head todo;
@@ -5750,6 +5799,8 @@ static int binder_proc_show(struct seq_file *m, void *unused)
 {
 	struct binder_proc *itr;
 	int pid = (unsigned long)m->private;
+
+	INIT_LLIST_NODE(&proc->deferred_work_node);
 
 	rt_mutex_lock(&binder_procs_lock);
 	hlist_for_each_entry(itr, &binder_procs, proc_node) {
