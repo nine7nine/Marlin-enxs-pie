@@ -68,6 +68,7 @@ void rcu_sync_lockdep_assert(struct rcu_sync *rsp)
 	RCU_LOCKDEP_WARN(!gp_ops[rsp->gp_type].held(),
 			 "suspicious rcu_sync_is_idle() usage");
 }
+EXPORT_SYMBOL_GPL(rcu_sync_lockdep_assert);
 #endif
 
 /**
@@ -78,7 +79,7 @@ void rcu_sync_lockdep_assert(struct rcu_sync *rsp)
 void rcu_sync_init(struct rcu_sync *rsp, enum rcu_sync_type type)
 {
 	memset(rsp, 0, sizeof(*rsp));
-	init_swait_head(&rsp->gp_wait);
+	init_waitqueue_head(&rsp->gp_wait);
 	rsp->gp_type = type;
 }
 
@@ -101,21 +102,21 @@ void rcu_sync_enter(struct rcu_sync *rsp)
 {
 	bool need_wait, need_sync;
 
-	raw_spin_lock_irq(&rsp->rss_lock);
+	spin_lock_irq(&rsp->rss_lock);
 	need_wait = rsp->gp_count++;
 	need_sync = rsp->gp_state == GP_IDLE;
 	if (need_sync)
 		rsp->gp_state = GP_PENDING;
-	raw_spin_unlock_irq(&rsp->rss_lock);
+	spin_unlock_irq(&rsp->rss_lock);
 
 	BUG_ON(need_wait && need_sync);
 
 	if (need_sync) {
 		gp_ops[rsp->gp_type].sync();
 		rsp->gp_state = GP_PASSED;
-		swait_wake_all(&rsp->gp_wait);
+		wake_up_all(&rsp->gp_wait);
 	} else if (need_wait) {
-		swait_event(rsp->gp_wait, rsp->gp_state == GP_PASSED);
+		wait_event(rsp->gp_wait, rsp->gp_state == GP_PASSED);
 	} else {
 		/*
 		 * Possible when there's a pending CB from a rcu_sync_exit().
@@ -152,7 +153,7 @@ static void rcu_sync_func(struct rcu_head *rcu)
 	BUG_ON(rsp->gp_state != GP_PASSED);
 	BUG_ON(rsp->cb_state == CB_IDLE);
 
-	raw_spin_lock_irqsave(&rsp->rss_lock, flags);
+	spin_lock_irqsave(&rsp->rss_lock, flags);
 	if (rsp->gp_count) {
 		/*
 		 * A new rcu_sync_begin() has happened; drop the callback.
@@ -173,7 +174,7 @@ static void rcu_sync_func(struct rcu_head *rcu)
 		rsp->cb_state = CB_IDLE;
 		rsp->gp_state = GP_IDLE;
 	}
-	raw_spin_unlock_irqrestore(&rsp->rss_lock, flags);
+	spin_unlock_irqrestore(&rsp->rss_lock, flags);
 }
 
 /**
@@ -188,7 +189,7 @@ static void rcu_sync_func(struct rcu_head *rcu)
  */
 void rcu_sync_exit(struct rcu_sync *rsp)
 {
-	raw_spin_lock_irq(&rsp->rss_lock);
+	spin_lock_irq(&rsp->rss_lock);
 	if (!--rsp->gp_count) {
 		if (rsp->cb_state == CB_IDLE) {
 			rsp->cb_state = CB_PENDING;
@@ -197,7 +198,7 @@ void rcu_sync_exit(struct rcu_sync *rsp)
 			rsp->cb_state = CB_REPLAY;
 		}
 	}
-	raw_spin_unlock_irq(&rsp->rss_lock);
+	spin_unlock_irq(&rsp->rss_lock);
 }
 
 /**
@@ -210,11 +211,11 @@ void rcu_sync_dtor(struct rcu_sync *rsp)
 
 	BUG_ON(rsp->gp_count);
 
-	raw_spin_lock_irq(&rsp->rss_lock);
+	spin_lock_irq(&rsp->rss_lock);
 	if (rsp->cb_state == CB_REPLAY)
 		rsp->cb_state = CB_PENDING;
 	cb_state = rsp->cb_state;
-	raw_spin_unlock_irq(&rsp->rss_lock);
+	spin_unlock_irq(&rsp->rss_lock);
 
 	if (cb_state != CB_IDLE) {
 		gp_ops[rsp->gp_type].wait();

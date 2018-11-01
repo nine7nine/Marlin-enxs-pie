@@ -4,6 +4,7 @@
 #include <linux/cpu.h>
 #include <linux/err.h>
 #include <linux/smp.h>
+#include <linux/delay.h>
 #include <linux/init.h>
 #include <linux/list.h>
 #include <linux/slab.h>
@@ -322,3 +323,4 @@ void smpboot_unregister_percpu_thread(struct smp_hotplug_thread *plug_thread)
 	put_online_cpus();
 }
 EXPORT_SYMBOL_GPL(smpboot_unregister_percpu_thread);
+

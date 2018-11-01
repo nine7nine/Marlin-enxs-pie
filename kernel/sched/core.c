@@ -1361,6 +1361,11 @@ static const struct cpumask *get_adjusted_cpumask(const struct task_struct *p,
 	if (p->flags & PF_PERF_CRITICAL)
 		return cpu_perf_mask;
 
+	/* Force all trivial, unbound kthreads onto the little cluster */
+	if (p->flags & PF_KTHREAD && p->pid != 1 &&
+		cpumask_equal(req_mask, cpu_all_mask))
+		return cpu_lp_mask;
+
 	return req_mask;
 }
 
@@ -2749,8 +2754,8 @@ unsigned long to_ratio(u64 period, u64 runtime)
 #ifdef CONFIG_SMP
 inline struct dl_bw *dl_bw_of(int i)
 {
-	rcu_lockdep_assert(rcu_read_lock_sched_held(),
-			   "sched RCU must be held");
+	RCU_LOCKDEP_WARN(!rcu_read_lock_sched_held(),
+			 "sched RCU must be held");
 	return &cpu_rq(i)->rd->dl_bw;
 }
 
@@ -2759,8 +2764,8 @@ static inline int dl_bw_cpus(int i)
 	struct root_domain *rd = cpu_rq(i)->rd;
 	int cpus = 0;
 
-	rcu_lockdep_assert(rcu_read_lock_sched_held(),
-			   "sched RCU must be held");
+	RCU_LOCKDEP_WARN(!rcu_read_lock_sched_held(),
+			 "sched RCU must be held");
 	for_each_cpu_and(i, rd->span, cpu_active_mask)
 		cpus++;
 
@@ -3738,7 +3743,6 @@ static void __sched notrace __schedule(bool preempt)
 
 	cpu = smp_processor_id();
 	rq = cpu_rq(cpu);
-	rcu_note_context_switch(cpu);
 	prev = rq->curr;
 
 	/*
