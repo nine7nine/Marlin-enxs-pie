@@ -2,15 +2,6 @@ ifdef CONFIG_FUNCTION_TRACER
 CFLAGS_REMOVE_clock.o = -pg
 endif
 
-# KASAN instrumentation is temporarily disabled for energy.o due to the repeated
-# reports that caused the kernel to not boot as seen in b/31800756. Should a fix
-# be provided, this line can be removed again. But given that KCOV is also disabled
-# for this module, it might be worth thinking about whether or not we should also
-# just turn off KASAN instrumentation entirely here.
-KASAN_SANITIZE_core.o := n
-KASAN_SANITIZE_energy.o := n
-KASAN_SANITIZE_fair.o := n
-
 # These files are disabled because they produce non-interesting flaky coverage
 # that is not a function of syscall inputs. E.g. involuntary context switches.
 KCOV_INSTRUMENT := n
@@ -34,4 +25,6 @@ obj-$(CONFIG_SCHEDSTATS) += stats.o
 obj-$(CONFIG_SCHED_DEBUG) += debug.o
 obj-$(CONFIG_SCHED_TUNE) += tune.o
 obj-$(CONFIG_CGROUP_CPUACCT) += cpuacct.o
+obj-$(CONFIG_CPU_FREQ) += cpufreq.o
 obj-$(CONFIG_CPU_FREQ_GOV_SCHED) += cpufreq_sched.o
+obj-$(CONFIG_CPU_FREQ_GOV_SCHEDUTIL) += cpufreq_schedutil.o

@@ -11,7 +11,6 @@
 #include <linux/hrtimer.h>
 
 #include "walt.h"
-#include "tune.h"
 
 int sched_rr_timeslice = RR_TIMESLICE;
 
@@ -1083,6 +1082,9 @@ static void update_curr_rt(struct rq *rq)
 	if (unlikely((s64)delta_exec <= 0))
 		return;
 
+	/* Kick cpufreq (see the comment in kernel/sched/sched.h). */
+	cpufreq_update_this_cpu(rq, SCHED_CPUFREQ_RT);
+
 	schedstat_set(curr->se.statistics.exec_max,
 		      max(curr->se.statistics.exec_max, delta_exec));
 
@@ -1424,7 +1426,6 @@ enqueue_task_rt(struct rq *rq, struct task_struct *p, int flags)
 		return;
 
 	rt_se->schedtune_enqueued = true;
-	schedtune_enqueue_task(p, cpu_of(rq));
 	sched_rt_update_capacity_req(rq, false);
 }
 
@@ -1448,7 +1449,6 @@ static void dequeue_task_rt(struct rq *rq, struct task_struct *p, int flags)
 	}
 
 	rt_se->schedtune_enqueued = false;
-	schedtune_dequeue_task(p, cpu_of(rq));
 	sched_rt_update_capacity_req(rq, false);
 }
 
@@ -2111,7 +2111,9 @@ retry:
 	}
 
 	deactivate_task(rq, next_task, 0);
+	next_task->on_rq = TASK_ON_RQ_MIGRATING;
 	set_task_cpu(next_task, lowest_rq->cpu);
+	next_task->on_rq = TASK_ON_RQ_QUEUED;
 	activate_task(lowest_rq, next_task, 0);
 	ret = 1;
 
@@ -2365,7 +2367,9 @@ static void pull_rt_task(struct rq *this_rq)
 			resched = true;
 
 			deactivate_task(src_rq, p, 0);
+			p->on_rq = TASK_ON_RQ_MIGRATING;
 			set_task_cpu(p, this_cpu);
+			p->on_rq = TASK_ON_RQ_QUEUED;
 			activate_task(this_rq, p, 0);
 			/*
 			 * We continue with the search, just in
