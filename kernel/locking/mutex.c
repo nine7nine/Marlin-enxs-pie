@@ -992,36 +992,66 @@ __mutex_lock_common(struct mutex *lock, long state, unsigned int subclass,
 				goto err;
 		}
 
-		__set_task_state(task, state);
-
-		/* didn't get the lock, go to sleep: */
 		spin_unlock_mutex(&lock->wait_lock, flags);
 		schedule_preempt_disabled();
+
+		/*
+		 * ww_mutex needs to always recheck its position since its waiter
+		 * list is not FIFO ordered.
+		 */
+		if ((use_ww_ctx && ww_ctx) || !first) {
+			first = __mutex_waiter_is_first(lock, &waiter);
+			if (first)
+				__mutex_set_flag(lock, MUTEX_FLAG_HANDOFF);
+		}
+
+		set_current_state(state);
+		/*
+		 * Here we order against unlock; we must either see it change
+		 * state back to RUNNING and fall through the next schedule(),
+		 * or we must see its unlock and acquire.
+		 */
+		if (__mutex_trylock(lock) ||
+		    (first && mutex_optimistic_spin(lock, ww_ctx, use_ww_ctx, &waiter)))
+			break;
+
 		spin_lock_mutex(&lock->wait_lock, flags);
 	}
+	spin_lock_mutex(&lock->wait_lock, flags);
+acquired:
+	__set_current_state(TASK_RUNNING);
 
-	mutex_remove_waiter(lock, &waiter, task);
-	/* set it to 0 if there are no waiters left: */
+	if (use_ww_ctx && ww_ctx) {
+		/*
+		 * Wound-Wait; we stole the lock (!first_waiter), check the
+		 * waiters as anyone might want to wound us.
+		 */
+		if (!ww_ctx->is_wait_die &&
+		    !__mutex_waiter_is_first(lock, &waiter))
+			__ww_mutex_check_waiters(lock, ww_ctx);
+	}
+
+	mutex_remove_waiter(lock, &waiter, current);
 	if (likely(list_empty(&lock->wait_list)))
-		atomic_set(&lock->count, 0);
+		__mutex_clear_flag(lock, MUTEX_FLAGS);
+
 	debug_mutex_free_waiter(&waiter);
 
 skip_wait:
 	/* got the lock - cleanup and rejoice! */
 	lock_acquired(&lock->dep_map, ip);
-	mutex_set_owner(lock);
 
-	if (use_ww_ctx) {
-		struct ww_mutex *ww = container_of(lock, struct ww_mutex, base);
-		ww_mutex_set_context_slowpath(ww, ww_ctx);
-	}
+	if (use_ww_ctx && ww_ctx)
+		ww_mutex_lock_acquired(ww, ww_ctx);
 
 	spin_unlock_mutex(&lock->wait_lock, flags);
 	preempt_enable();
 	return 0;
 
 err:
-	mutex_remove_waiter(lock, &waiter, task);
+	__set_current_state(TASK_RUNNING);
+	mutex_remove_waiter(lock, &waiter, current);
+err_early_kill:
 	spin_unlock_mutex(&lock->wait_lock, flags);
 	debug_mutex_free_waiter(&waiter);
 	mutex_release(&lock->dep_map, 1, ip);

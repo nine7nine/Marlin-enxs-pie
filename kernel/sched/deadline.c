@@ -233,17 +233,23 @@ static inline bool need_pull_dl_task(struct rq *rq, struct task_struct *prev)
 	return dl_task(prev);
 }
 
-static DEFINE_PER_CPU(struct callback_head, dl_balance_head);
+static DEFINE_PER_CPU(struct callback_head, dl_push_head);
+static DEFINE_PER_CPU(struct callback_head, dl_pull_head);
 
 static void push_dl_tasks(struct rq *);
+static void pull_dl_task(struct rq *);
 
 static inline void deadline_queue_push_tasks(struct rq *rq)
 {
 	if (!has_pushable_dl_tasks(rq))
 		return;
 
-	queue_balance_callback(rq, &per_cpu(dl_balance_head, rq->cpu),
-		push_dl_tasks);
+	queue_balance_callback(rq, &per_cpu(dl_push_head, rq->cpu), push_dl_tasks);
+}
+
+static inline void deadline_queue_pull_task(struct rq *rq)
+{
+	queue_balance_callback(rq, &per_cpu(dl_pull_head, rq->cpu), pull_dl_task);
 }
 
 static struct rq *find_lock_later_rq(struct task_struct *task, struct rq *rq);
@@ -324,12 +330,15 @@ static inline bool need_pull_dl_task(struct rq *rq, struct task_struct *prev)
 	return false;
 }
 
-static inline int pull_dl_task(struct rq *rq)
+static inline void pull_dl_task(struct rq *rq)
 {
-	return 0;
 }
 
-static inline void queue_push_tasks(struct rq *rq)
+static inline void deadline_queue_push_tasks(struct rq *rq)
+{
+}
+
+static inline void deadline_queue_pull_task(struct rq *rq)
 {
 }
 #endif /* CONFIG_SMP */
@@ -1222,10 +1231,8 @@ pick_next_task_dl(struct rq *rq, struct task_struct *prev, struct rq_flags *rf)
 	/* Running task will never be pushed. */
        dequeue_pushable_dl_task(rq, p);
 
-#ifdef CONFIG_SCHED_HRTICK
 	if (hrtick_enabled(rq))
 		start_hrtick_dl(rq, p);
-#endif
 
 	deadline_queue_push_tasks(rq);
 
@@ -1690,7 +1697,8 @@ skip:
 		double_unlock_balance(this_rq, src_rq);
 	}
 
-	return ret;
+	if (resched)
+		resched_curr(this_rq);
 }
 
 /*

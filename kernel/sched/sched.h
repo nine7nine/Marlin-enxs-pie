@@ -1,3 +1,4 @@
+
 #include <linux/sched.h>
 #include <linux/sched/sysctl.h>
 #include <linux/sched/rt.h>
@@ -469,7 +470,7 @@ static inline int rt_bandwidth_enabled(void)
 }
 
 /* RT IPI pull logic requires IRQ_WORK */
-#ifdef CONFIG_IRQ_WORK
+#if defined(CONFIG_IRQ_WORK) && defined(CONFIG_SMP)
 # define HAVE_RT_PUSH_IPI
 #endif
 
@@ -491,12 +492,6 @@ struct rt_rq {
 	unsigned long rt_nr_total;
 	int overloaded;
 	struct plist_head pushable_tasks;
-#ifdef HAVE_RT_PUSH_IPI
-	int push_flags;
-	int push_cpu;
-	struct irq_work push_work;
-	raw_spinlock_t push_lock;
-#endif
 #endif /* CONFIG_SMP */
 	int rt_queued;
 
@@ -596,6 +591,19 @@ struct root_domain {
 	struct dl_bw dl_bw;
 	struct cpudl cpudl;
 
+#ifdef HAVE_RT_PUSH_IPI
+	/*
+	 * For IPI pull requests, loop across the rto_mask.
+	 */
+	struct irq_work rto_push_work;
+	raw_spinlock_t rto_lock;
+	/* These are only updated and read within rto_lock */
+	int rto_loop;
+	int rto_cpu;
+	/* These atomics are updated outside of a lock */
+	atomic_t rto_loop_next;
+	atomic_t rto_loop_start;
+#endif
 	/*
 	 * The "RT overload" flag: it gets set if a CPU has more than
 	 * one runnable RT task.
@@ -614,6 +622,9 @@ extern struct root_domain def_root_domain;
 extern void sched_get_rd(struct root_domain *rd);
 extern void sched_put_rd(struct root_domain *rd);
 
+#ifdef HAVE_RT_PUSH_IPI
+extern void rto_push_irq_work_func(struct irq_work *work);
+#endif
 #endif /* CONFIG_SMP */
 
 /*
@@ -701,6 +712,7 @@ struct rq {
 	/* For active balancing */
 	int active_balance;
 	int push_cpu;
+	struct task_struct *push_task;
 	struct cpu_stop_work active_balance_work;
 	/* cpu of this runqueue: */
 	int cpu;
@@ -939,21 +951,6 @@ extern int migrate_swap(struct task_struct *, struct task_struct *);
 #endif /* CONFIG_NUMA_BALANCING */
 
 #ifdef CONFIG_SMP
-
-static inline void
-queue_balance_callback(struct rq *rq,
-		       struct callback_head *head,
-		       void (*func)(struct rq *rq))
-{
-	lockdep_assert_held(&rq->lock);
-
-	if (unlikely(head->next))
-		return;
-
-	head->func = (void (*)(struct callback_head *))func;
-	head->next = rq->balance_callback;
-	rq->balance_callback = head;
-}
 
 static inline void
 queue_balance_callback(struct rq *rq,
@@ -1743,68 +1740,6 @@ static inline unsigned long cpu_util_freq(int cpu)
 	return (util >= capacity) ? capacity : util;
 }
 
-#endif
-
-#ifdef CONFIG_CPU_FREQ_GOV_SCHED
-#define capacity_max SCHED_CAPACITY_SCALE
-extern unsigned int capacity_margin;
-extern struct static_key __sched_freq;
-
-static inline bool sched_freq(void)
-{
-	return static_key_false(&__sched_freq);
-}
-
-/*
- * sched_capacity_reqs expects capacity requests to be normalised.
- * All capacities should sum to the range of 0-1024.
- */
-DECLARE_PER_CPU(struct sched_capacity_reqs, cpu_sched_capacity_reqs);
-void update_cpu_capacity_request(int cpu, bool request);
-
-static inline void set_cfs_cpu_capacity(int cpu, bool request,
-					unsigned long capacity)
-{
-	struct sched_capacity_reqs *scr = &per_cpu(cpu_sched_capacity_reqs, cpu);
-
-	if (scr->cfs == capacity)
-		return;
-	scr->cfs = capacity;
-	update_cpu_capacity_request(cpu, request);
-}
-
-static inline void set_rt_cpu_capacity(int cpu, bool request,
-				       unsigned long capacity)
-{
-	struct sched_capacity_reqs *scr = &per_cpu(cpu_sched_capacity_reqs, cpu);
-
-	if (scr->rt == capacity)
-		return;
-	scr->rt = capacity;
-	update_cpu_capacity_request(cpu, request);
-}
-
-static inline void set_dl_cpu_capacity(int cpu, bool request,
-				       unsigned long capacity)
-{
-	struct sched_capacity_reqs *scr = &per_cpu(cpu_sched_capacity_reqs, cpu);
-
-	if (scr->dl == capacity)
-		return;
-	scr->dl = capacity;
-	update_cpu_capacity_request(cpu, request);
-}
-#else
-static inline bool sched_freq(void) { return false; }
-static inline void set_cfs_cpu_capacity(int cpu, bool request,
-					unsigned long capacity)
-{ }
-static inline void set_rt_cpu_capacity(int cpu, bool request,
-				       unsigned long capacity)
-{ }
-static inline void set_dl_cpu_capacity(int cpu, bool request,
-				       unsigned long capacity)
-{ }
 #endif
 
 static inline void sched_rt_avg_update(struct rq *rq, u64 rt_delta)

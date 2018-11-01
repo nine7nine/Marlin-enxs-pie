@@ -1035,18 +1035,20 @@ int timekeeping_notify(struct clocksource *clock)
 void getrawmonotonic(struct timespec *ts)
 {
 	struct timekeeper *tk = &tk_core.timekeeper;
+	struct timespec64 ts64;
 	unsigned long seq;
 	s64 nsecs;
 
 	do {
 		seq = read_seqcount_begin(&tk_core.seq);
-		ts->tv_sec = tk->raw_sec;
+		ts64.tv_sec = tk->raw_sec;
 		nsecs = timekeeping_get_ns(&tk->tkr_raw);
 
 	} while (read_seqcount_retry(&tk_core.seq, seq));
 
-	ts->tv_nsec = 0;
-	timespec_add_ns(ts, nsecs);
+	ts64.tv_nsec = 0;
+	timespec64_add_ns(&ts64, nsecs);
+	*ts = timespec64_to_timespec(ts64);
 }
 EXPORT_SYMBOL(getrawmonotonic);
 

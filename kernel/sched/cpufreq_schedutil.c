@@ -21,8 +21,6 @@
 
 unsigned long boosted_cpu_util(int cpu);
 
-unsigned long boosted_cpu_util(int cpu);
-
 /* Stub out fast switch routines present on mainline to reduce the backport
  * overhead. */
 #define cpufreq_driver_fast_switch(x, y) 0
@@ -184,15 +182,6 @@ static unsigned int get_next_freq(struct sugov_policy *sg_policy,
 	sg_policy->need_freq_update = false;
 	sg_policy->cached_raw_freq = freq;
 	return cpufreq_driver_resolve_freq(policy, freq);
-}
-
-static inline bool use_pelt(void)
-{
-#ifdef CONFIG_SCHED_WALT
-	return (!sysctl_sched_use_walt_cpu_util || walt_disabled);
-#else
-	return true;
-#endif
 }
 
 static inline bool use_pelt(void)
