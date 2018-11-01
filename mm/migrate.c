@@ -1,5 +1,5 @@
 /*
- * Memory Migration functionality - linux/mm/migration.c
+ * Memory Migration functionality - linux/mm/migrate.c
  *
  * Copyright (C) 2006 Silicon Graphics, Inc., Christoph Lameter
  *
@@ -171,6 +171,9 @@ static int remove_migration_pte(struct page *new, struct vm_area_struct *vma,
 		page_add_anon_rmap(new, vma, addr);
 	else
 		page_add_file_rmap(new);
+
+	if (vma->vm_flags & VM_LOCKED)
+		mlock_vma_page(new);
 
 	/* No need to invalidate - it was non-present before */
 	update_mmu_cache(vma, addr, ptep);
@@ -544,7 +547,6 @@ void migrate_page_copy(struct page *newpage, struct page *page)
 	cpupid = page_cpupid_xchg_last(page, -1);
 	page_cpupid_xchg_last(newpage, cpupid);
 
-	mlock_migrate_page(newpage, page);
 	ksm_migrate_page(newpage, page);
 	/*
 	 * Please do not reorder this without considering how mm/ksm.c's
@@ -1105,7 +1107,7 @@ out:
  *
  * The function returns after 10 attempts or if no pages are movable any more
  * because the list has become empty or no retryable pages exist any more.
- * The caller should call putback_lru_pages() to return pages to the LRU
+ * The caller should call putback_movable_pages() to return pages to the LRU
  * or free list only if ret != 0.
  *
  * Returns the number of pages that were not migrated, or an error code.
@@ -1164,7 +1166,8 @@ int migrate_pages(struct list_head *from, new_page_t get_new_page,
 			}
 		}
 	}
-	rc = nr_failed + retry;
+	nr_failed += retry;
+	rc = nr_failed;
 out:
 	if (nr_succeeded)
 		count_vm_events(PGMIGRATE_SUCCESS, nr_succeeded);
@@ -1822,7 +1825,6 @@ fail_putback:
 			SetPageActive(page);
 		if (TestClearPageUnevictable(new_page))
 			SetPageUnevictable(page);
-		mlock_migrate_page(page, new_page);
 
 		unlock_page(new_page);
 		put_page(new_page);		/* Free it */
@@ -1863,6 +1865,7 @@ fail_putback:
 		goto fail_putback;
 	}
 
+	mlock_migrate_page(new_page, page);
 	mem_cgroup_migrate(page, new_page, false);
 
 	page_remove_rmap(page);
