@@ -301,6 +301,9 @@ static u32 __log_align __used = LOG_ALIGN;
 #define LOG_MAGIC(msg)
 #endif
 
+static unsigned int user_log_level = 2;
+module_param(user_log_level, uint, S_IRUGO | S_IWUSR);
+
 /* human readable text of the record */
 static char *log_text(const struct printk_log *msg)
 {
@@ -579,6 +582,11 @@ static ssize_t devkmsg_write(struct kiocb *iocb, struct iov_iter *from)
 		i = simple_strtoul(line+1, &endp, 10);
 		if (endp && endp[0] == '>') {
 			level = i & 7;
+			if (level > user_log_level) {
+				ret = 0;
+				goto out;
+			}
+
 			if (i >> 3)
 				facility = i >> 3;
 			endp++;
@@ -588,6 +596,8 @@ static ssize_t devkmsg_write(struct kiocb *iocb, struct iov_iter *from)
 	}
 
 	printk_emit(facility, level, NULL, 0, "%s", line);
+
+out:
 	kfree(buf);
 	return ret;
 }
@@ -993,7 +1003,7 @@ static void boot_delay_msec(int level)
 	unsigned long long k;
 	unsigned long timeout;
 
-	if ((boot_delay == 0 || system_state != SYSTEM_BOOTING)
+	if ((boot_delay == 0 || system_state != SYSTEM_RUNNING)
 		|| (level >= console_loglevel && !ignore_loglevel)) {
 		return;
 	}
@@ -1738,6 +1748,62 @@ static size_t cont_print_text(char *text, size_t size)
 	return textlen;
 }
 
+#ifdef CONFIG_EARLY_PRINTK
+struct console *early_console;
+
+void early_vprintk(const char *fmt, va_list ap)
+{
+	if (early_console) {
+		char buf[512];
+		int n = vscnprintf(buf, sizeof(buf), fmt, ap);
+
+		early_console->write(early_console, buf, n);
+	}
+}
+
+asmlinkage void early_printk(const char *fmt, ...)
+{
+	va_list ap;
+
+	va_start(ap, fmt);
+	early_vprintk(fmt, ap);
+	va_end(ap);
+}
+
+/*
+ * This is independent of any log levels - a global
+ * kill switch that turns off all of printk.
+ *
+ * Used by the NMI watchdog if early-printk is enabled.
+ */
+static bool __read_mostly printk_killswitch;
+
+static int __init force_early_printk_setup(char *str)
+{
+	printk_killswitch = true;
+	return 0;
+}
+early_param("force_early_printk", force_early_printk_setup);
+
+void printk_kill(void)
+{
+	printk_killswitch = true;
+}
+
+static int forced_early_printk(const char *fmt, va_list ap)
+{
+	if (!printk_killswitch)
+		return 0;
+	early_vprintk(fmt, ap);
+	return 1;
+}
+#else
+static inline int forced_early_printk(const char *fmt, va_list ap)
+{
+	return 0;
+}
+#endif
+
 asmlinkage int vprintk_emit(int facility, int level,
 			    const char *dict, size_t dictlen,
 			    const char *fmt, va_list args)
@@ -1753,6 +1819,13 @@ asmlinkage int vprintk_emit(int facility, int level,
 	bool in_sched = false;
 	/* cpu currently holding logbuf_lock in this function */
 	static volatile unsigned int logbuf_cpu = UINT_MAX;
+
+	/*
+	 * Fall back to early_printk if a debugging subsystem has
+	 * killed printk output
+	 */
+	if (unlikely(forced_early_printk(fmt, args)))
+		return 1;
 
 	if (level == SCHED_MESSAGE_LOGLEVEL) {
 		level = -1;
@@ -2034,29 +2107,6 @@ static size_t cont_print_text(char *text, size_t size) { return 0; }
 DEFINE_PER_CPU(printk_func_t, printk_func);
 
 #endif /* CONFIG_PRINTK */
-
-#ifdef CONFIG_EARLY_PRINTK
-struct console *early_console;
-
-void early_vprintk(const char *fmt, va_list ap)
-{
-	if (early_console) {
-		char buf[512];
-		int n = vscnprintf(buf, sizeof(buf), fmt, ap);
-
-		early_console->write(early_console, buf, n);
-	}
-}
-
-asmlinkage __visible void early_printk(const char *fmt, ...)
-{
-	va_list ap;
-
-	va_start(ap, fmt);
-	early_vprintk(fmt, ap);
-	va_end(ap);
-}
-#endif
 
 static int __add_preferred_console(char *name, int idx, char *options,
 				   char *brl_options)
