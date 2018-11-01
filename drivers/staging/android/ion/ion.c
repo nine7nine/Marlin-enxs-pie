@@ -154,10 +154,10 @@ static struct ion_buffer *ion_buffer_create(struct ion_heap *heap,
 			"heap->ops->map_dma should return ERR_PTR on error"))
 		table = ERR_PTR(-EINVAL);
 	if (IS_ERR(table)) {
-		heap->ops->free(buffer);
-		kfree(buffer);
-		return ERR_CAST(table);
+		ret = -EINVAL;
+		goto err1;
 	}
+
 	buffer->sg_table = table;
 	if (ion_buffer_fault_user_mappings(buffer)) {
 		int num_pages = PAGE_ALIGN(buffer->size) / PAGE_SIZE;
@@ -167,7 +167,7 @@ static struct ion_buffer *ion_buffer_create(struct ion_heap *heap,
 		buffer->pages = vmalloc(sizeof(struct page *) * num_pages);
 		if (!buffer->pages) {
 			ret = -ENOMEM;
-			goto err1;
+			goto err;
 		}
 
 		for_each_sg(table->sgl, sg, table->nents, i) {
@@ -176,23 +176,22 @@ static struct ion_buffer *ion_buffer_create(struct ion_heap *heap,
 			for (j = 0; j < sg->length / PAGE_SIZE; j++)
 				buffer->pages[k++] = page++;
 		}
-
-		if (ret)
-			goto err;
 	}
 
 	rt_mutex_init(&buffer->lock);
-	/* this will set up dma addresses for the sglist -- it is not
-	   technically correct as per the dma api -- a specific
-	   device isn't really taking ownership here.  However, in practice on
-	   our systems the only dma_address space is physical addresses.
-	   Additionally, we can't afford the overhead of invalidating every
-	   allocation via dma_map_sg. The implicit contract here is that
-	   memory coming from the heaps is ready for dma, ie if it has a
-	   cached mapping that mapping has been invalidated */
+	/*
+	 * this will set up dma addresses for the sglist -- it is not
+	 * technically correct as per the dma api -- a specific
+	 * device isn't really taking ownership here.  However, in practice on
+	 * our systems the only dma_address space is physical addresses.
+	 * Additionally, we can't afford the overhead of invalidating every
+	 * allocation via dma_map_sg. The implicit contract here is that
+	 * memory coming from the heaps is ready for dma, ie if it has a
+	 * cached mapping that mapping has been invalidated
+	 */
 	for_each_sg(buffer->sg_table->sgl, sg, buffer->sg_table->nents, i) {
 		if (sg_dma_address(sg) == 0)
-			sg_dma_address(sg) = sg_phys(sg);
+		    sg_dma_address(sg) = sg_phys(sg);
 	}
 	rt_mutex_lock(&dev->buffer_lock);
 	ion_buffer_add(dev, buffer);
@@ -202,10 +201,8 @@ static struct ion_buffer *ion_buffer_create(struct ion_heap *heap,
 
 err:
 	heap->ops->unmap_dma(heap, buffer);
-	heap->ops->free(buffer);
 err1:
-	if (buffer->pages)
-		vfree(buffer->pages);
+	heap->ops->free(buffer);
 err2:
 	kfree(buffer);
 	return ERR_PTR(ret);
@@ -219,8 +216,7 @@ void ion_buffer_destroy(struct ion_buffer *buffer)
 
 	atomic_sub(buffer->size, &buffer->heap->total_allocated);
 	buffer->heap->ops->free(buffer);
-	if (buffer->pages)
-		vfree(buffer->pages);
+	vfree(buffer->pages);
 	kfree(buffer);
 }
 
@@ -403,7 +399,7 @@ static struct ion_handle *pass_to_user(struct ion_handle *handle)
 /* Must hold the client lock */
 static int user_ion_handle_put_nolock(struct ion_handle *handle)
 {
-	int ret;
+	int ret = 0;
 
 	if (--handle->user_ref_count == 0)
 		ret = ion_handle_put_nolock(handle);
@@ -1225,7 +1221,7 @@ static void ion_vm_close(struct vm_area_struct *vma)
 		buffer->heap->ops->unmap_user(buffer->heap, buffer);
 }
 
-static struct vm_operations_struct ion_vma_ops = {
+static const struct vm_operations_struct ion_vma_ops = {
 	.open = ion_vm_open,
 	.close = ion_vm_close,
 	.fault = ion_vm_fault,
@@ -1923,8 +1919,10 @@ void ion_device_add_heap(struct ion_device *dev, struct ion_heap *heap)
 
 	heap->dev = dev;
 	down_write(&dev->lock);
-	/* use negative heap->id to reverse the priority -- when traversing
-	   the list later attempt higher id numbers first */
+	/*
+	 * use negative heap->id to reverse the priority -- when traversing
+	 * the list later attempt higher id numbers first
+	 */
 	plist_node_init(&heap->node, -heap->id);
 	plist_add(&heap->node, &dev->heaps);
 	debug_file = debugfs_create_file(heap->name, 0664,
@@ -1956,6 +1954,7 @@ void ion_device_add_heap(struct ion_device *dev, struct ion_heap *heap)
 		}
 	}
 #endif
+
 	up_write(&dev->lock);
 }
 
@@ -2002,6 +2001,7 @@ struct ion_device *ion_device_create(long (*custom_ioctl)
 	ret = misc_register(&idev->dev);
 	if (ret) {
 		pr_err("ion: failed to register misc device.\n");
+		kfree(idev);
 		return ERR_PTR(ret);
 	}
 

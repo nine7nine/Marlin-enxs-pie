@@ -293,7 +293,7 @@ static struct binder_transaction_log_entry *binder_transaction_log_add(
 	unsigned int cur = atomic_inc_return(&log->cur);
 
 	if (cur >= ARRAY_SIZE(log->entry))
-		log->full = 1;
+		log->full = true;
 	e = &log->entry[cur % ARRAY_SIZE(log->entry)];
 	WRITE_ONCE(e->debug_id_done, 0);
 	/*
@@ -886,8 +886,8 @@ binder_enqueue_work_ilocked(struct binder_work *work,
  * Requires the proc->inner_lock to be held.
  */
 static void
-binder_enqueue_thread_work_ilocked_nowake(struct binder_thread *thread,
-					  struct binder_work *work)
+binder_enqueue_deferred_thread_work_ilocked(struct binder_thread *thread,
+					    struct binder_work *work)
 {
 	binder_enqueue_work_ilocked(work, &thread->todo);
 }
@@ -2472,7 +2472,6 @@ static void binder_transaction_buffer_release(struct binder_proc *proc,
 		off_end = failed_at;
 	else
 		off_end = (void *)off_start + buffer->offsets_size;
-
 	for (offp = off_start; offp < off_end; offp++) {
 		struct binder_object_header *hdr;
 		size_t object_size = binder_validate_object(buffer, *offp);
@@ -2909,7 +2908,7 @@ static bool binder_proc_transaction(struct binder_transaction *t,
 		if (node->has_async_transaction) {
 			pending_async = true;
 		} else {
-			node->has_async_transaction = 1;
+			node->has_async_transaction = true;
 		}
 	}
 
@@ -3764,7 +3763,7 @@ static int binder_thread_write(struct binder_proc *proc,
 				w = binder_dequeue_work_head_ilocked(
 						&buf_node->async_todo);
 				if (!w) {
-					buf_node->has_async_transaction = 0;
+					buf_node->has_async_transaction = false;
 				} else {
 					binder_enqueue_work_ilocked(
 							w, &proc->todo);
@@ -4645,6 +4644,15 @@ static int binder_thread_release(struct binder_proc *proc,
 	}
 	binder_inner_proc_unlock(thread->proc);
 
+	/*
+	 * This is needed to avoid races between wake_up_poll() above and
+	 * and ep_remove_waitqueue() called for other reasons (eg the epoll file
+	 * descriptor being closed); ep_remove_waitqueue() holds an RCU read
+	 * lock, so we can be sure it's done after calling synchronize_rcu().
+	 */
+	if (thread->looper & BINDER_LOOPER_STATE_POLL)
+		synchronize_rcu();
+
 	if (send_reply)
 		binder_send_failed_reply(send_reply, BR_DEAD_REPLY);
 	binder_release_work(proc, &thread->todo);
@@ -4660,6 +4668,8 @@ static unsigned int binder_poll(struct file *filp,
 	bool wait_for_proc_work;
 
 	thread = binder_get_thread(proc);
+	if (!thread)
+		return POLLERR;
 
 	binder_inner_proc_lock(thread->proc);
 	thread->looper |= BINDER_LOOPER_STATE_POLL;
@@ -4897,7 +4907,6 @@ static long binder_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
 			ret = -EFAULT;
 			goto err;
 		}
-
 		break;
 	}
 	default:
@@ -4982,7 +4991,7 @@ static int binder_mmap(struct file *filp, struct vm_area_struct *vma)
 	return ret;
 
 err_bad_arg:
-	pr_err("binder_mmap: %d %lx-%lx %s failed %d\n",
+	pr_err("%s: %d %lx-%lx %s failed %d\n", __func__,
 	       proc->pid, vma->vm_start, vma->vm_end, failure_string, ret);
 	return ret;
 }
@@ -4992,7 +5001,7 @@ static int binder_open(struct inode *nodp, struct file *filp)
 	struct binder_proc *proc;
 	struct binder_device *binder_dev;
 
-	binder_debug(BINDER_DEBUG_OPEN_CLOSE, "binder_open: %d:%d\n",
+	binder_debug(BINDER_DEBUG_OPEN_CLOSE, "%s: %d:%d\n", __func__,
 		     current->group_leader->pid, current->pid);
 
 	proc = kzalloc(sizeof(*proc), GFP_KERNEL);
@@ -5272,7 +5281,7 @@ binder_defer_work(struct binder_proc *proc, enum binder_deferred_state defer)
 	if (hlist_unhashed(&proc->deferred_work_node)) {
 		hlist_add_head(&proc->deferred_work_node,
 				&binder_deferred_list);
-		queue_work(binder_deferred_workqueue, &binder_deferred_work);
+		schedule_work(&binder_deferred_work);
 	}
 	mutex_unlock(&binder_deferred_lock);
 }
@@ -5856,9 +5865,6 @@ static int __init binder_init(void)
 
 	atomic_set(&binder_transaction_log.cur, ~0U);
 	atomic_set(&binder_transaction_log_failed.cur, ~0U);
-	binder_deferred_workqueue = create_singlethread_workqueue("binder");
-	if (!binder_deferred_workqueue)
-		return -ENOMEM;
 
 	binder_debugfs_dir_entry_root = debugfs_create_dir("binder", NULL);
 	if (binder_debugfs_dir_entry_root)
@@ -5920,8 +5926,6 @@ err_init_binder_device_failed:
 	}
 err_alloc_device_names_failed:
 	debugfs_remove_recursive(binder_debugfs_dir_entry_root);
-
-	destroy_workqueue(binder_deferred_workqueue);
 
 	return ret;
 }
