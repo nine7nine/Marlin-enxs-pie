@@ -3103,6 +3103,15 @@ int q6asm_set_shared_circ_buff(struct audio_client *ac,
 		goto done;
 	}
 
+	mutex_lock(&ac->cmd_lock);
+
+	if (ac->port[dir].buf) {
+		pr_err("%s: Buffer already allocated\n", __func__);
+		rc = -EINVAL;
+		mutex_unlock(&ac->cmd_lock);
+		goto done;
+	}
+
 	buf_circ = kzalloc(sizeof(struct audio_buffer), GFP_KERNEL);
 
 	if (!buf_circ) {

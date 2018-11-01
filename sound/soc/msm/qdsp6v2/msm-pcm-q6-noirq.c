@@ -179,8 +179,17 @@ static void event_handler(uint32_t opcode,
 static int msm_pcm_open(struct snd_pcm_substream *substream)
 {
 	struct snd_pcm_runtime *runtime = substream->runtime;
+	struct snd_soc_pcm_runtime *soc_prtd = substream->private_data;
 	struct msm_audio *prtd;
+	struct msm_plat_data *pdata;
 	int ret = 0;
+
+	pdata = (struct msm_plat_data *)
+		dev_get_drvdata(soc_prtd->platform->dev);
+	if (!pdata) {
+		pr_err("%s: platform data not populated\n", __func__);
+		return -EINVAL;
+	}
 
 	prtd = kzalloc(sizeof(struct msm_audio), GFP_KERNEL);
 
@@ -246,6 +255,15 @@ static int msm_pcm_open(struct snd_pcm_substream *substream)
 	prtd->dsp_cnt = 0;
 	prtd->set_channel_map = false;
 	runtime->private_data = prtd;
+	/* Vote to update the Rx thread priority to RT Thread for playback */
+	if ((substream->stream == SNDRV_PCM_STREAM_PLAYBACK) &&
+	    (pdata->perf_mode == LOW_LATENCY_PCM_MODE))
+		apr_start_rx_rt(prtd->audio_client->apr);
+	/* Vote to update the Tx thread priority to RT Thread for record */
+	if ((substream->stream == SNDRV_PCM_STREAM_CAPTURE) &&
+	    (pdata->perf_mode == LOW_LATENCY_PCM_MODE))
+		apr_start_tx_rt(prtd->audio_client->apr);
+
 	return 0;
 
 fail_cmd:
@@ -559,9 +577,20 @@ static int msm_pcm_close(struct snd_pcm_substream *substream)
 	int ret = 0;
 
 	if (ac) {
-		if (substream->stream == SNDRV_PCM_STREAM_PLAYBACK)
+		/* 
+		Don't give msm_pcm_close the Unvote downgrade For Glink Tx/Rx 
+		thread priority. But *DO* give it an upgrade vote in 
+		msm_pcm_open() calls for Low-Latency use case. 
+
+		by not allowing the Unvote here ~ we keep it's rtprio set.
+		The down vote would lower priority, resulting in clicks
+		and pops on background playback with no (top-app) audio app 
+		actually focused. 
+		 */
+		if (substream->stream == SNDRV_PCM_STREAM_PLAYBACK) 
 			dir = IN;
-		else if (substream->stream == SNDRV_PCM_STREAM_CAPTURE)
+
+		else if (substream->stream == SNDRV_PCM_STREAM_CAPTURE) 
 			dir = OUT;
 
 		/* determine timeout length */

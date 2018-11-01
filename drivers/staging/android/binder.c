@@ -2,7 +2,12 @@
  *
  * Android IPC Subsystem
  *
+ * Binder_rt with rt_mutexes for locks; 
+ *
  * Copyright (C) 2007-2008 Google, Inc.
+ * Copyright (c) 2017 Jordan Johnston
+ *
+ * jordan Johnston <johnstonljordan@gmail.com>
  *
  * This software is licensed under the terms of the GNU General Public
  * License version 2, as published by the Free Software Foundation, and
@@ -13,6 +18,40 @@
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
  * GNU General Public License for more details.
  *
+ */
+
+/*
+ * Locking overview
+ *
+ * There are 3 main spinlocks which must be acquired in the
+ * order shown:
+ *
+ * 1) proc->outer_lock : protects binder_ref
+ *    binder_proc_lock() and binder_proc_unlock() are
+ *    used to acq/rel.
+ * 2) node->lock : protects most fields of binder_node.
+ *    binder_node_lock() and binder_node_unlock() are
+ *    used to acq/rel
+ * 3) proc->inner_lock : protects the thread and node lists
+ *    (proc->threads, proc->waiting_threads, proc->nodes)
+ *    and all todo lists associated with the binder_proc
+ *    (proc->todo, thread->todo, proc->delivered_death and
+ *    node->async_todo), as well as thread->transaction_stack
+ *    binder_inner_proc_lock() and binder_inner_proc_unlock()
+ *    are used to acq/rel
+ *
+ * Any lock under procA must never be nested under any lock at the same
+ * level or below on procB.
+ *
+ * Functions that require a lock held on entry indicate which lock
+ * in the suffix of the function name:
+ *
+ * foo_olocked() : requires node->outer_lock
+ * foo_nlocked() : requires node->lock
+ * foo_ilocked() : requires proc->inner_lock
+ * foo_oilocked(): requires proc->outer_lock and proc->inner_lock
+ * foo_nilocked(): requires node->lock and proc->inner_lock
+ * ...
  */
 
 /*
@@ -71,7 +110,11 @@
 #include <linux/security.h>
 #include <linux/spinlock.h>
 
-#include "binder.h"
+#ifdef CONFIG_ANDROID_BINDER_IPC_32BIT
+#define BINDER_IPC_32BIT 1
+#endif
+
+#include <uapi/linux/android/binder.h>
 #include "binder_alloc.h"
 #include "binder_trace.h"
 
@@ -2236,6 +2279,26 @@ static void binder_cleanup_transaction(struct binder_transaction *t,
 }
 
 /**
+ * binder_cleanup_transaction() - cleans up undelivered transaction
+ * @t:		transaction that needs to be cleaned up
+ * @reason:	reason the transaction wasn't delivered
+ * @error_code:	error to return to caller (if synchronous call)
+ */
+static void binder_cleanup_transaction(struct binder_transaction *t,
+				       const char *reason,
+				       uint32_t error_code)
+{
+	if (t->buffer->target_node && !(t->flags & TF_ONE_WAY)) {
+		binder_send_failed_reply(t, error_code);
+	} else {
+		binder_debug(BINDER_DEBUG_DEAD_TRANSACTION,
+			"undelivered transaction %d, %s\n",
+			t->debug_id, reason);
+		binder_free_transaction(t);
+	}
+}
+
+/**
  * binder_validate_object() - checks for a valid metadata object in a buffer.
  * @buffer:	binder_buffer that we're parsing.
  * @offset:	offset in the buffer at which to validate an object.
@@ -2506,7 +2569,7 @@ static void binder_transaction_buffer_release(struct binder_proc *proc,
 				       debug_id, (u64)fda->num_fds);
 				continue;
 			}
-			fd_array = (u32 *)(parent_buffer + fda->parent_offset);
+			fd_array = (u32 *)(parent_buffer + (uintptr_t)fda->parent_offset);
 			for (fd_index = 0; fd_index < fda->num_fds; fd_index++)
 				task_close_fd(proc, fd_array[fd_index]);
 		} break;
@@ -2730,7 +2793,7 @@ static int binder_translate_fd_array(struct binder_fd_array_object *fda,
 	 */
 	parent_buffer = parent->buffer -
 		binder_alloc_get_user_buffer_offset(&target_proc->alloc);
-	fd_array = (u32 *)(parent_buffer + fda->parent_offset);
+	fd_array = (u32 *)(parent_buffer + (uintptr_t)fda->parent_offset);
 	if (!IS_ALIGNED((unsigned long)fd_array, sizeof(u32))) {
 		binder_user_error("%d:%d parent offset not aligned correctly.\n",
 				  proc->pid, thread->pid);
@@ -3339,6 +3402,7 @@ static void binder_transaction(struct binder_proc *proc,
 						  proc->pid, thread->pid);
 				return_error_param = -EFAULT;
 				return_error = BR_FAILED_REPLY;
+				return_error_param = -EINVAL;
 				return_error_line = __LINE__;
 				goto err_copy_data_failed;
 			}
@@ -4228,7 +4292,6 @@ retry:
 			if (ret)
 				return ret;
 		} break;
-		case BINDER_WORK_DEAD_BINDER:
 		case BINDER_WORK_DEAD_BINDER_AND_CLEAR:
 		case BINDER_WORK_CLEAR_DEATH_NOTIFICATION: {
 			struct binder_ref_death *death;
@@ -4805,7 +4868,6 @@ static long binder_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
 			ret = -EINVAL;
 			goto err;
 		}
-
 		if (put_user(BINDER_CURRENT_PROTOCOL_VERSION,
 			     &ver->protocol_version)) {
 			ret = -EINVAL;
@@ -4876,7 +4938,7 @@ static int binder_vm_fault(struct vm_area_struct *vma, struct vm_fault *vmf)
 	return VM_FAULT_SIGBUS;
 }
 
-static struct vm_operations_struct binder_vm_ops = {
+static const struct vm_operations_struct binder_vm_ops = {
 	.open = binder_vma_open,
 	.close = binder_vma_close,
 	.fault = binder_vm_fault,
@@ -5674,14 +5736,14 @@ static int binder_proc_show(struct seq_file *m, void *unused)
 	struct binder_proc *itr;
 	int pid = (unsigned long)m->private;
 
-	mutex_lock(&binder_procs_lock);
+	rt_mutex_lock(&binder_procs_lock);
 	hlist_for_each_entry(itr, &binder_procs, proc_node) {
 		if (itr->pid == pid) {
 			seq_puts(m, "binder proc state:\n");
 			print_binder_proc(m, itr, 1);
 		}
 	}
-	mutex_unlock(&binder_procs_lock);
+	rt_mutex_unlock(&binder_procs_lock);
 
 	return 0;
 }

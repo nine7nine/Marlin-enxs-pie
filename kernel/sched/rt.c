@@ -7,10 +7,10 @@
 
 #include <linux/interrupt.h>
 #include <linux/slab.h>
-#include <linux/irq_work.h>
 #include <linux/hrtimer.h>
 
 #include "walt.h"
+#include "tune.h"
 
 int sched_rr_timeslice = RR_TIMESLICE;
 
@@ -998,16 +998,15 @@ static int sched_rt_runtime_exceeded(struct rt_rq *rt_rq)
 	return 0;
 }
 
-/* TODO: Make configurable */
 #define RT_SCHEDTUNE_INTERVAL 50000000ULL
 
-static void sched_rt_update_capacity_req(struct rq *rq, bool tick);
+static void sched_rt_update_capacity_req(struct rq *rq);
 
 static enum hrtimer_restart rt_schedtune_timer(struct hrtimer *timer)
 {
 	struct sched_rt_entity *rt_se = container_of(timer,
-						     struct sched_rt_entity,
-						     schedtune_timer);
+			struct sched_rt_entity,
+			schedtune_timer);
 	struct task_struct *p = rt_task_of(rt_se);
 	struct rq *rq = task_rq(p);
 
@@ -1028,7 +1027,7 @@ static enum hrtimer_restart rt_schedtune_timer(struct hrtimer *timer)
 	 * Also check the schedtune_enqueued flag as class-switch on a
 	 * sleeping task may have already canceled the timer and done dq
 	 */
-	if (p->on_rq || rt_se->schedtune_enqueued == false)
+	if (p->on_rq || !rt_se->schedtune_enqueued)
 		goto out;
 
 	/*
@@ -1036,7 +1035,8 @@ static enum hrtimer_restart rt_schedtune_timer(struct hrtimer *timer)
 	 */
 	rt_se->schedtune_enqueued = false;
 	schedtune_dequeue_task(p, cpu_of(rq));
-	sched_rt_update_capacity_req(rq, false);
+	sched_rt_update_capacity_req(rq);
+	cpufreq_update_this_cpu(rq, SCHED_CPUFREQ_RT);
 out:
 	raw_spin_unlock(&rq->lock);
 
@@ -1062,7 +1062,7 @@ static void start_schedtune_timer(struct sched_rt_entity *rt_se)
 	struct hrtimer *timer = &rt_se->schedtune_timer;
 
 	hrtimer_start(timer, ns_to_ktime(RT_SCHEDTUNE_INTERVAL),
-		      HRTIMER_MODE_REL_PINNED);
+			HRTIMER_MODE_REL_PINNED);
 }
 
 /*
@@ -1399,9 +1399,9 @@ enqueue_task_rt(struct rq *rq, struct task_struct *p, int flags)
 	enqueue_rt_entity(rt_se, flags & ENQUEUE_HEAD);
 	walt_inc_cumulative_runnable_avg(rq, p);
 
-	if (!task_current(rq, p) && p->nr_cpus_allowed > 1) {
+	if (!task_current(rq, p) && p->nr_cpus_allowed > 1)
 		enqueue_pushable_task(rq, p);
-	}
+
 	if (!schedtune_task_boost(p))
 		return;
 
@@ -1422,11 +1422,13 @@ enqueue_task_rt(struct rq *rq, struct task_struct *p, int flags)
 	 * and timer just released rq lock, or if the timer finished
 	 * running and canceling the boost
 	 */
-	if (rt_se->schedtune_enqueued == true)
+	if (rt_se->schedtune_enqueued)
 		return;
 
 	rt_se->schedtune_enqueued = true;
-	sched_rt_update_capacity_req(rq, false);
+	schedtune_enqueue_task(p, cpu_of(rq));
+	sched_rt_update_capacity_req(rq);
+	cpufreq_update_this_cpu(rq, SCHED_CPUFREQ_RT);
 }
 
 static void dequeue_task_rt(struct rq *rq, struct task_struct *p, int flags)
@@ -1439,7 +1441,7 @@ static void dequeue_task_rt(struct rq *rq, struct task_struct *p, int flags)
 
 	dequeue_pushable_task(rq, p);
 
-	if (rt_se->schedtune_enqueued == false)
+	if (!rt_se->schedtune_enqueued)
 		return;
 
 	if (flags == DEQUEUE_SLEEP) {
@@ -1449,7 +1451,9 @@ static void dequeue_task_rt(struct rq *rq, struct task_struct *p, int flags)
 	}
 
 	rt_se->schedtune_enqueued = false;
-	sched_rt_update_capacity_req(rq, false);
+	schedtune_dequeue_task(p, cpu_of(rq));
+	sched_rt_update_capacity_req(rq);
+	cpufreq_update_this_cpu(rq, SCHED_CPUFREQ_RT);
 }
 
 /*
@@ -1544,18 +1548,22 @@ task_may_not_preempt(struct task_struct *task, int cpu)
 		 task_pc & SOFTIRQ_MASK));
 }
 
+/*
+ * Perform a schedtune dequeue and cancelation of boost timers if needed.
+ * Should be called only with the rq->lock held.
+ */
 static void schedtune_dequeue_rt(struct rq *rq, struct task_struct *p)
 {
 	struct sched_rt_entity *rt_se = &p->rt;
 
 	BUG_ON(!raw_spin_is_locked(&rq->lock));
 
-	if (rt_se->schedtune_enqueued == false)
+	if (!rt_se->schedtune_enqueued)
 		return;
 
 	/*
-	 * Incase of class change cancel any active timers. Otherwise, increase
-	 * the boost. If an enqueued timer was cancelled, put the task ref.
+	 * Incase of class change cancel any active timers. If an enqueued
+	 * timer was cancelled, put the task ref.
 	 */
 	if (hrtimer_try_to_cancel(&rt_se->schedtune_timer) == 1)
 		put_task_struct(p);
@@ -1563,7 +1571,8 @@ static void schedtune_dequeue_rt(struct rq *rq, struct task_struct *p)
 	/* schedtune_enqueued is true, deboost it */
 	rt_se->schedtune_enqueued = false;
 	schedtune_dequeue_task(p, task_cpu(p));
-	sched_rt_update_capacity_req(rq, false);
+	sched_rt_update_capacity_req(rq);
+	cpufreq_update_this_cpu(rq, SCHED_CPUFREQ_RT);
 }
 
 static int
