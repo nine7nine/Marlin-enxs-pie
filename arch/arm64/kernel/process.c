@@ -48,6 +48,7 @@
 #endif
 
 #include <asm/alternative.h>
+#include <asm/tlbflush.h>
 #include <asm/compat.h>
 #include <asm/cacheflush.h>
 #include <asm/fpsimd.h>
@@ -397,6 +398,12 @@ static void uao_thread_switch(struct task_struct *next)
 			asm(ALTERNATIVE("nop", SET_PSTATE_UAO(0), ARM64_HAS_UAO));
 	}
 }
+static void tlb_flush_thread(struct task_struct *prev)
+{
+/* Flush the prev task&apos;s TLB entries */
+if (prev->mm)
+flush_tlb_mm(prev->mm);
+}
 
 #ifdef CONFIG_THREAD_INFO_IN_TASK
 /*
@@ -430,6 +437,7 @@ struct task_struct *__switch_to(struct task_struct *prev,
 	entry_task_switch(next);
 #endif
 	uao_thread_switch(next);
+	tlb_flush_thread(prev);
 
 	/*
 	 * Complete any pending TLB or cache maintenance on this CPU in case
