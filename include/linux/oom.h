@@ -51,6 +51,14 @@ static inline bool oom_task_origin(const struct task_struct *p)
 
 extern void mark_oom_victim(struct task_struct *tsk);
 
+#ifdef CONFIG_MMU
+extern void wake_oom_reaper(struct task_struct *tsk);
+#else
+static inline void wake_oom_reaper(struct task_struct *tsk)
+{
+}
+#endif
+
 extern unsigned long oom_badness(struct task_struct *p,
 		struct mem_cgroup *memcg, const nodemask_t *nodemask,
 		unsigned long totalpages);
@@ -73,7 +81,7 @@ extern enum oom_scan_t oom_scan_process_thread(struct task_struct *task,
 extern bool out_of_memory(struct zonelist *zonelist, gfp_t gfp_mask,
 		int order, nodemask_t *mask, bool force_kill);
 
-extern void exit_oom_victim(void);
+extern void exit_oom_victim(struct task_struct *tsk);
 
 extern int register_oom_notifier(struct notifier_block *nb);
 extern int unregister_oom_notifier(struct notifier_block *nb);
@@ -89,16 +97,7 @@ static inline bool oom_gfp_allowed(gfp_t gfp_mask)
 
 extern struct task_struct *find_lock_task_mm(struct task_struct *p);
 
-static inline bool task_will_free_mem(struct task_struct *task)
-{
-	/*
-	 * A coredumping process may sleep for an extended period in exit_mm(),
-	 * so the oom killer cannot assume that the process will promptly exit
-	 * and release memory.
-	 */
-	return (task->flags & PF_EXITING) &&
-		!(task->signal->flags & SIGNAL_GROUP_COREDUMP);
-}
+bool task_will_free_mem(struct task_struct *task);
 
 extern void dump_tasks(struct mem_cgroup *memcg,
 		const nodemask_t *nodemask);
