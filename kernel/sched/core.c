@@ -1212,6 +1212,33 @@ void check_preempt_curr(struct rq *rq, struct task_struct *p, int flags)
 }
 
 #ifdef CONFIG_SMP
+
+static inline bool is_per_cpu_kthread(struct task_struct *p)
+{
+	if (!(p->flags & PF_KTHREAD))
+		return false;
+
+	if (p->nr_cpus_allowed != 1)
+		return false;
+
+	return true;
+}
+
+/*
+ * Per-CPU kthreads are allowed to run on !actie && online CPUs, see
+ * __set_cpus_allowed_ptr() and select_fallback_rq().
+ */
+static inline bool is_cpu_allowed(struct task_struct *p, int cpu)
+{
+	if (!cpumask_test_cpu(cpu, &p->cpus_allowed))
+		return false;
+
+	if (is_per_cpu_kthread(p))
+		return cpu_online(cpu);
+
+	return cpu_active(cpu);
+}
+
 /*
  * This is how migration works:
  *
@@ -1269,11 +1296,8 @@ struct migration_arg {
  */
 static struct rq *__migrate_task(struct rq *rq, struct task_struct *p, int dest_cpu)
 {
-	if (unlikely(!cpu_active(dest_cpu)))
-		return rq;
-
 	/* Affinity changed (again). */
-	if (!cpumask_test_cpu(dest_cpu, tsk_cpus_allowed(p)))
+	if (!is_cpu_allowed(p, dest_cpu))
 		return rq;
 
 	rq = move_queued_task(rq, p, dest_cpu);
@@ -1330,10 +1354,22 @@ void set_cpus_allowed_common(struct task_struct *p, const struct cpumask *new_ma
 	p->nr_cpus_allowed = cpumask_weight(new_mask);
 }
 
+static const struct cpumask *get_adjusted_cpumask(const struct task_struct *p,
+	const struct cpumask *req_mask)
+{
+	/* Force all performance-critical kthreads onto the big cluster */
+	if (p->flags & PF_PERF_CRITICAL)
+		return cpu_perf_mask;
+
+	return req_mask;
+}
+
 void do_set_cpus_allowed(struct task_struct *p, const struct cpumask *new_mask)
 {
 	struct rq *rq = task_rq(p);
 	bool queued, running;
+
+	new_mask = get_adjusted_cpumask(p, new_mask);
 
 	lockdep_assert_held(&p->pi_lock);
 
@@ -1376,6 +1412,8 @@ static int __set_cpus_allowed_ptr(struct task_struct *p,
 	struct rq_flags rf;
 	struct rq *rq;
 	int ret = 0;
+
+	new_mask = get_adjusted_cpumask(p, new_mask);
 
 	rq = task_rq_lock(p, &rf);
 	update_rq_clock(rq);
@@ -1790,10 +1828,9 @@ static int select_fallback_rq(int cpu, struct task_struct *p)
 	for (;;) {
 		/* Any allowed, online CPU? */
 		for_each_cpu(dest_cpu, tsk_cpus_allowed(p)) {
-			if (!(p->flags & PF_KTHREAD) && !cpu_active(dest_cpu))
+			if (!is_cpu_allowed(p, dest_cpu))
 				continue;
-			if (!cpu_online(dest_cpu))
-				continue;
+
 			goto out;
 		}
 
@@ -3635,7 +3672,8 @@ pick_next_task(struct rq *rq, struct task_struct *prev)
 		if (unlikely(!p))
 			p = idle_sched_class.pick_next_task(rq, prev);
 
-		return p;
+		if (likely(p != RETRY_TASK))
+			return p;
 	}
 
 again:

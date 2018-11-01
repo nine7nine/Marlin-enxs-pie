@@ -21,6 +21,15 @@
 
 #include "internals.h"
 
+struct irq_desc_list {
+	struct list_head list;
+	struct irq_desc *desc;
+} perf_crit_irqs = {
+	.list = LIST_HEAD_INIT(perf_crit_irqs.list)
+};
+
+static DEFINE_RAW_SPINLOCK(perf_irqs_lock);
+
 #ifdef CONFIG_IRQ_FORCED_THREADING
 __read_mostly bool force_irqthreads;
 
@@ -68,14 +77,20 @@ static void __synchronize_hardirq(struct irq_desc *desc)
  *	Do not use this for shutdown scenarios where you must be sure
  *	that all parts (hardirq and threaded handler) have completed.
  *
+ *	Returns: false if a threaded handler is active.
+ *
  *	This function may be called - with care - from IRQ context.
  */
-void synchronize_hardirq(unsigned int irq)
+bool synchronize_hardirq(unsigned int irq)
 {
 	struct irq_desc *desc = irq_to_desc(irq);
 
-	if (desc)
+	if (desc) {
 		__synchronize_hardirq(desc);
+		return !atomic_read(&desc->threads_active);
+	}
+
+	return true;
 }
 EXPORT_SYMBOL(synchronize_hardirq);
 
@@ -109,6 +124,14 @@ EXPORT_SYMBOL(synchronize_irq);
 #ifdef CONFIG_SMP
 cpumask_var_t irq_default_affinity;
 
+static bool __irq_can_set_affinity(struct irq_desc *desc)
+{
+	if (!desc || !irqd_can_balance(&desc->irq_data) ||
+	    !desc->irq_data.chip || !desc->irq_data.chip->irq_set_affinity)
+		return false;
+	return true;
+}
+
 /**
  *	irq_can_set_affinity - Check if the affinity of a given irq can be set
  *	@irq:		Interrupt to check
@@ -116,13 +139,22 @@ cpumask_var_t irq_default_affinity;
  */
 int irq_can_set_affinity(unsigned int irq)
 {
+	return __irq_can_set_affinity(irq_to_desc(irq));
+}
+
+/**
+ * irq_can_set_affinity_usr - Check if affinity of a irq can be set from user space
+ * @irq:	Interrupt to check
+ *
+ * Like irq_can_set_affinity() above, but additionally checks for the
+ * AFFINITY_MANAGED flag.
+ */
+bool irq_can_set_affinity_usr(unsigned int irq)
+{
 	struct irq_desc *desc = irq_to_desc(irq);
 
-	if (!desc || !irqd_can_balance(&desc->irq_data) ||
-	    !desc->irq_data.chip || !desc->irq_data.chip->irq_set_affinity)
-		return 0;
-
-	return 1;
+	return __irq_can_set_affinity(desc) &&
+		!irqd_affinity_is_managed(&desc->irq_data);
 }
 
 /**
@@ -243,6 +275,9 @@ int irq_set_affinity_hint(unsigned int irq, const struct cpumask *m)
 		return -EINVAL;
 	desc->affinity_hint = m;
 	irq_put_desc_unlock(desc, flags);
+	/* set the initial affinity to prevent every interrupt being on CPU0 */
+	if (m)
+		__irq_set_affinity(irq, m, false);
 	return 0;
 }
 EXPORT_SYMBOL_GPL(irq_set_affinity_hint);
@@ -322,14 +357,13 @@ EXPORT_SYMBOL_GPL(irq_set_affinity_notifier);
 /*
  * Generic version of the affinity autoselector.
  */
-static int
-setup_affinity(unsigned int irq, struct irq_desc *desc, struct cpumask *mask)
+static int setup_affinity(struct irq_desc *desc, struct cpumask *mask)
 {
 	struct cpumask *set = irq_default_affinity;
 	int node = desc->irq_data.node;
 
 	/* Excludes PER_CPU and NO_BALANCE interrupts */
-	if (!irq_can_set_affinity(irq))
+	if (!__irq_can_set_affinity(desc))
 		return 0;
 
 	/*
@@ -356,10 +390,10 @@ setup_affinity(unsigned int irq, struct irq_desc *desc, struct cpumask *mask)
 	return 0;
 }
 #else
-static inline int
-setup_affinity(unsigned int irq, struct irq_desc *d, struct cpumask *mask)
+/* Wrapper for ALPHA specific affinity selector magic */
+static inline int setup_affinity(struct irq_desc *d, struct cpumask *mask)
 {
-	return irq_select_affinity(irq);
+	return irq_select_affinity(irq_desc_get_irq(d));
 }
 #endif
 
@@ -373,14 +407,14 @@ int irq_select_affinity_usr(unsigned int irq, struct cpumask *mask)
 	int ret;
 
 	raw_spin_lock_irqsave(&desc->lock, flags);
-	ret = setup_affinity(irq, desc, mask);
+	ret = setup_affinity(desc, mask);
 	raw_spin_unlock_irqrestore(&desc->lock, flags);
 	return ret;
 }
 
 #else
 static inline int
-setup_affinity(unsigned int irq, struct irq_desc *desc, struct cpumask *mask)
+setup_affinity(struct irq_desc *desc, struct cpumask *mask)
 {
 	return 0;
 }
@@ -439,6 +473,32 @@ void disable_irq(unsigned int irq)
 		synchronize_irq(irq);
 }
 EXPORT_SYMBOL(disable_irq);
+
+/**
+ *	disable_hardirq - disables an irq and waits for hardirq completion
+ *	@irq: Interrupt to disable
+ *
+ *	Disable the selected interrupt line.  Enables and Disables are
+ *	nested.
+ *	This function waits for any pending hard IRQ handlers for this
+ *	interrupt to complete before returning. If you use this function while
+ *	holding a resource the hard IRQ handler may need you will deadlock.
+ *
+ *	When used to optimistically disable an interrupt from atomic context
+ *	the return value must be checked.
+ *
+ *	Returns: false if a threaded handler is active.
+ *
+ *	This function may be called - with care - from IRQ context.
+ */
+bool disable_hardirq(unsigned int irq)
+{
+	if (!__disable_irq_nosync(irq))
+		return synchronize_hardirq(irq);
+
+	return false;
+}
+EXPORT_SYMBOL_GPL(disable_hardirq);
 
 void __enable_irq(struct irq_desc *desc, unsigned int irq)
 {
@@ -1057,6 +1117,72 @@ setup_irq_thread(struct irqaction *new, unsigned int irq, bool secondary)
 	return 0;
 }
 
+static void add_desc_to_perf_list(struct irq_desc *desc)
+{
+	struct irq_desc_list *item;
+	unsigned long flags;
+
+	item = kmalloc(sizeof(*item), GFP_ATOMIC);
+	if (WARN_ON(!item))
+		return;
+
+	item->desc = desc;
+
+	raw_spin_lock_irqsave(&perf_irqs_lock, flags);
+	list_add(&item->list, &perf_crit_irqs.list);
+	raw_spin_unlock_irqrestore(&perf_irqs_lock, flags);
+}
+
+static void affine_one_perf_thread(struct task_struct *t)
+{
+	t->flags |= PF_PERF_CRITICAL;
+	set_cpus_allowed_ptr(t, cpu_perf_mask);
+}
+
+static void unaffine_one_perf_thread(struct task_struct *t)
+{
+	t->flags &= ~PF_PERF_CRITICAL;
+	set_cpus_allowed_ptr(t, cpu_all_mask);
+}
+
+void unaffine_perf_irqs(void)
+{
+	struct irq_desc_list *data;
+	unsigned long outer_flags;
+
+	raw_spin_lock_irqsave(&perf_irqs_lock, outer_flags);
+	list_for_each_entry(data, &perf_crit_irqs.list, list) {
+		struct irq_desc *desc = data->desc;
+		unsigned long flags;
+
+		raw_spin_lock_irqsave(&desc->lock, flags);
+		irq_set_affinity_locked(&desc->irq_data, cpu_all_mask, true);
+		if (desc->action->thread)
+			unaffine_one_perf_thread(desc->action->thread);
+		raw_spin_unlock_irqrestore(&desc->lock, flags);
+	}
+	raw_spin_unlock_irqrestore(&perf_irqs_lock, outer_flags);
+}
+
+void reaffine_perf_irqs(void)
+{
+	struct irq_desc_list *data;
+	unsigned long outer_flags;
+
+	raw_spin_lock_irqsave(&perf_irqs_lock, outer_flags);
+	list_for_each_entry(data, &perf_crit_irqs.list, list) {
+		struct irq_desc *desc = data->desc;
+		unsigned long flags;
+
+		raw_spin_lock_irqsave(&desc->lock, flags);
+		irq_set_affinity_locked(&desc->irq_data, cpu_perf_mask, true);
+		if (desc->action->thread)
+			affine_one_perf_thread(desc->action->thread);
+		raw_spin_unlock_irqrestore(&desc->lock, flags);
+	}
+	raw_spin_unlock_irqrestore(&perf_irqs_lock, outer_flags);
+}
+
 /*
  * Internal function to register an irqaction - typically used to
  * allocate special interrupts that are part of the architecture.
@@ -1117,6 +1243,9 @@ __setup_irq(unsigned int irq, struct irq_desc *desc, struct irqaction *new)
 			if (ret)
 				goto out_thread;
 		}
+
+		if (new->flags & IRQF_PERF_CRITICAL)
+			affine_one_perf_thread(new->thread);
 	}
 
 	if (!alloc_cpumask_var(&mask, GFP_KERNEL)) {
@@ -1279,7 +1408,14 @@ __setup_irq(unsigned int irq, struct irq_desc *desc, struct irqaction *new)
 		}
 
 		/* Set default affinity mask once everything is setup */
-		setup_affinity(irq, desc, mask);
+		if (new->flags & IRQF_PERF_CRITICAL) {
+			add_desc_to_perf_list(desc);
+			irqd_set(&desc->irq_data, IRQD_AFFINITY_MANAGED);
+			irq_set_affinity_locked(&desc->irq_data,
+				cpu_perf_mask, true);
+		} else {
+			setup_affinity(desc, mask);
+		}
 
 	} else if (new->flags & IRQF_TRIGGER_MASK) {
 		unsigned int nmsk = new->flags & IRQF_TRIGGER_MASK;

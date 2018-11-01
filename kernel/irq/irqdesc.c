@@ -77,6 +77,7 @@ static void desc_set_defaults(unsigned int irq, struct irq_desc *desc, int node,
 {
 	int cpu;
 
+	desc->irq_data.common = &desc->irq_common_data;
 	desc->irq_data.irq = irq;
 	desc->irq_data.chip = &no_irq_chip;
 	desc->irq_data.chip_data = NULL;
@@ -629,7 +630,7 @@ unsigned int kstat_irqs(unsigned int irq)
 {
 	struct irq_desc *desc = irq_to_desc(irq);
 	int cpu;
-	int sum = 0;
+	unsigned int sum = 0;
 
 	if (!desc || !desc->kstat_irqs)
 		return 0;
@@ -649,7 +650,7 @@ unsigned int kstat_irqs(unsigned int irq)
  */
 unsigned int kstat_irqs_usr(unsigned int irq)
 {
-	int sum;
+	unsigned int sum;
 
 	irq_lock_sparse();
 	sum = kstat_irqs(irq);

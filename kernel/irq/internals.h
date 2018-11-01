@@ -112,6 +112,8 @@ static inline void unregister_handler_proc(unsigned int irq,
 					   struct irqaction *action) { }
 #endif
 
+extern bool irq_can_set_affinity_usr(unsigned int irq);
+
 extern int irq_select_affinity_usr(unsigned int irq, struct cpumask *mask);
 
 extern void irq_set_thread_affinity(struct irq_desc *desc);
@@ -172,27 +174,27 @@ irq_put_desc_unlock(struct irq_desc *desc, unsigned long flags)
  */
 static inline void irqd_set_move_pending(struct irq_data *d)
 {
-	d->state_use_accessors |= IRQD_SETAFFINITY_PENDING;
+	__irqd_to_state(d) |= IRQD_SETAFFINITY_PENDING;
 }
 
 static inline void irqd_clr_move_pending(struct irq_data *d)
 {
-	d->state_use_accessors &= ~IRQD_SETAFFINITY_PENDING;
+	__irqd_to_state(d) &= ~IRQD_SETAFFINITY_PENDING;
 }
 
 static inline void irqd_clear(struct irq_data *d, unsigned int mask)
 {
-	d->state_use_accessors &= ~mask;
+	__irqd_to_state(d) &= ~mask;
 }
 
 static inline void irqd_set(struct irq_data *d, unsigned int mask)
 {
-	d->state_use_accessors |= mask;
+	__irqd_to_state(d) |= mask;
 }
 
 static inline bool irqd_has_set(struct irq_data *d, unsigned int mask)
 {
-	return d->state_use_accessors & mask;
+	return __irqd_to_state(d) & mask;
 }
 
 static inline void kstat_incr_irqs_this_cpu(unsigned int irq, struct irq_desc *desc)
