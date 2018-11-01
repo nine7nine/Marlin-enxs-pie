@@ -1235,8 +1235,8 @@ static struct rq *move_queued_task(struct rq *rq, struct task_struct *p, int new
 {
 	lockdep_assert_held(&rq->lock);
 
-	dequeue_task(rq, p, 0);
 	p->on_rq = TASK_ON_RQ_MIGRATING;
+	dequeue_task(rq, p, 0);
 	double_lock_balance(rq, cpu_rq(new_cpu));
 	set_task_cpu(p, new_cpu);
 	double_unlock_balance(rq, cpu_rq(new_cpu));
@@ -1371,12 +1371,21 @@ void do_set_cpus_allowed(struct task_struct *p, const struct cpumask *new_mask)
 static int __set_cpus_allowed_ptr(struct task_struct *p,
 				  const struct cpumask *new_mask, bool check)
 {
+	const struct cpumask *cpu_valid_mask = cpu_active_mask;
 	unsigned int dest_cpu;
 	struct rq_flags rf;
 	struct rq *rq;
 	int ret = 0;
 
 	rq = task_rq_lock(p, &rf);
+	update_rq_clock(rq);
+
+	if (p->flags & PF_KTHREAD) {
+		/*
+		 * Kernel threads are allowed on online && !active CPUs
+		 */
+		cpu_valid_mask = cpu_online_mask;
+	}
 
 	/*
 	 * Must re-check here, to close a race against __kthread_bind(),
@@ -1390,18 +1399,28 @@ static int __set_cpus_allowed_ptr(struct task_struct *p,
 	if (cpumask_equal(&p->cpus_allowed, new_mask))
 		goto out;
 
-	if (!cpumask_intersects(new_mask, cpu_active_mask)) {
+	if (!cpumask_intersects(new_mask, cpu_valid_mask)) {
 		ret = -EINVAL;
 		goto out;
 	}
 
 	do_set_cpus_allowed(p, new_mask);
 
+	if (p->flags & PF_KTHREAD) {
+		/*
+		 * For kernel threads that do indeed end up on online &&
+		 * !active we want to ensure they are strict per-cpu threads.
+		 */
+		WARN_ON(cpumask_intersects(new_mask, cpu_online_mask) &&
+			!cpumask_intersects(new_mask, cpu_active_mask) &&
+			p->nr_cpus_allowed != 1);
+	}
+
 	/* Can the task run on the task's current CPU? If so, we're done */
 	if (cpumask_test_cpu(task_cpu(p), new_mask))
 		goto out;
 
-	dest_cpu = cpumask_any_and(cpu_active_mask, new_mask);
+	dest_cpu = cpumask_any_and(cpu_valid_mask, new_mask);
 	if (task_running(rq, p) || p->state == TASK_WAKING) {
 		struct migration_arg arg = { p, dest_cpu };
 		/* Need help from migration thread: drop lock and wait. */
@@ -1487,11 +1506,13 @@ static void __migrate_swap_task(struct task_struct *p, int cpu)
 		src_rq = task_rq(p);
 		dst_rq = cpu_rq(cpu);
 
+		p->on_rq = TASK_ON_RQ_MIGRATING;
 		deactivate_task(src_rq, p, 0);
 		p->on_rq = TASK_ON_RQ_MIGRATING;
 		set_task_cpu(p, cpu);
 		p->on_rq = TASK_ON_RQ_QUEUED;
 		activate_task(dst_rq, p, 0);
+		p->on_rq = TASK_ON_RQ_QUEUED;
 		check_preempt_curr(dst_rq, p, 0);
 	} else {
 		/*
@@ -1722,6 +1743,25 @@ EXPORT_SYMBOL_GPL(kick_process);
 
 /*
  * ->cpus_allowed is protected by both rq->lock and p->pi_lock
+ *
+ * A few notes on cpu_active vs cpu_online:
+ *
+ *  - cpu_active must be a subset of cpu_online
+ *
+ *  - on cpu-up we allow per-cpu kthreads on the online && !active cpu,
+ *    see __set_cpus_allowed_ptr(). At this point the newly online
+ *    cpu isn't yet part of the sched domains, and balancing will not
+ *    see it.
+ *
+ *  - on cpu-down we clear cpu_active() to mask the sched domains and
+ *    avoid the load balancer to place new tasks on the to be removed
+ *    cpu. Existing tasks will remain running there and will be taken
+ *    off.
+ *
+ * This means that fallback selection must not select !active CPUs.
+ * And can assume that any active CPU must be online. Conversely
+ * select_task_rq() below may allow selection of !active CPUs in order
+ * to satisfy the above rules.
  */
 static int select_fallback_rq(int cpu, struct task_struct *p)
 {
@@ -1740,8 +1780,6 @@ static int select_fallback_rq(int cpu, struct task_struct *p)
 
 		/* Look for allowed, online CPU in same node. */
 		for_each_cpu(dest_cpu, nodemask) {
-			if (!cpu_online(dest_cpu))
-				continue;
 			if (!cpu_active(dest_cpu))
 				continue;
 			if (cpumask_test_cpu(dest_cpu, tsk_cpus_allowed(p)))
@@ -1752,9 +1790,9 @@ static int select_fallback_rq(int cpu, struct task_struct *p)
 	for (;;) {
 		/* Any allowed, online CPU? */
 		for_each_cpu(dest_cpu, tsk_cpus_allowed(p)) {
-			if (!cpu_online(dest_cpu))
+			if (!(p->flags & PF_KTHREAD) && !cpu_active(dest_cpu))
 				continue;
-			if (!cpu_active(dest_cpu))
+			if (!cpu_online(dest_cpu))
 				continue;
 			goto out;
 		}
@@ -2809,6 +2847,7 @@ void wake_up_new_task(struct task_struct *p)
 	post_init_entity_util_avg(&p->se);
 
 	walt_mark_task_starting(p);
+
 	activate_task(rq, p, ENQUEUE_WAKEUP_NEW);
 	p->on_rq = TASK_ON_RQ_QUEUED;
 	trace_sched_wakeup_new(p);
@@ -3016,6 +3055,10 @@ static struct rq *finish_task_switch(struct task_struct *prev)
 		 * task and put them back on the free list.
 		 */
 		kprobe_flush_task(prev);
+
+		/* Task is done with its stack. */
+		put_task_stack(prev);
+
 		put_task_struct(prev);
 	}
 
@@ -4067,6 +4110,8 @@ void set_user_nice(struct task_struct *p, long nice)
 		if (delta < 0 || (delta > 0 && task_running(rq, p)))
 			resched_curr(rq);
 	}
+	if (running)
+		p->sched_class->set_curr_task(rq);
 out_unlock:
 	task_rq_unlock(rq, p, &flags);
 }
@@ -5474,6 +5519,8 @@ void sched_show_task(struct task_struct *p)
 	int ppid;
 	unsigned long state = p->state;
 
+	if (!try_get_task_stack(p))
+		return;
 	if (state)
 		state = __ffs(state) + 1;
 	printk(KERN_INFO "%-15.15s %c", p->comm,
@@ -5503,6 +5550,7 @@ void sched_show_task(struct task_struct *p)
 
 	print_worker_info(KERN_INFO, p);
 	show_stack(p, NULL);
+	put_task_stack(p);
 }
 
 void show_state_filter(unsigned long state_filter)
@@ -5564,7 +5612,6 @@ void init_idle(struct task_struct *idle, int cpu)
 	raw_spin_lock(&rq->lock);
 
 	__sched_fork(0, idle);
-
 	idle->state = TASK_RUNNING;
 	idle->se.exec_start = sched_clock();
 
@@ -6601,11 +6648,11 @@ static void update_top_cache_domain(int cpu)
 		size = cpumask_weight(sched_domain_span(sd));
 		busy_sd = sd->parent; /* sd_busy */
 	}
-	rcu_assign_pointer(per_cpu(sd_busy, cpu), busy_sd);
 
 	rcu_assign_pointer(per_cpu(sd_llc, cpu), sd);
 	per_cpu(sd_llc_size, cpu) = size;
 	per_cpu(sd_llc_id, cpu) = id;
+	rcu_assign_pointer(per_cpu(sd_busy, cpu), busy_sd);
 
 	sd = lowest_flag_domain(cpu, SD_NUMA);
 	rcu_assign_pointer(per_cpu(sd_numa, cpu), sd);
@@ -8435,11 +8482,6 @@ void sched_offline_group(struct task_group *tg)
 	spin_unlock_irqrestore(&task_group_lock, flags);
 }
 
-/* change task's runqueue when it moves between groups.
- *	The caller of this function should have put the task in its new group
- *	by now. This function just updates tsk->se.cfs_rq and tsk->se.parent to
- *	reflect its new group.
- */
 static void sched_change_group(struct task_struct *tsk, int type)
 {
 	struct task_group *tg;

@@ -14,6 +14,7 @@
 #include <linux/suspend.h>
 #include <linux/seq_file.h>
 #include <linux/debugfs.h>
+#include <linux/pm_wakeirq.h>
 #include <linux/types.h>
 #include <linux/wakeup_reason.h>
 #include <trace/events/power.h>
@@ -25,6 +26,9 @@
  * if wakeup events are registered during or immediately before the transition.
  */
 bool events_check_enabled __read_mostly;
+
+/* First wakeup IRQ seen by the kernel in the last cycle. */
+unsigned int pm_wakeup_irq __read_mostly;
 
 /* If set and the system is suspending, terminate the suspend. */
 static bool pm_abort_suspend __read_mostly;
@@ -241,6 +245,8 @@ static int device_wakeup_attach(struct device *dev, struct wakeup_source *ws)
 		return -EEXIST;
 	}
 	dev->power.wakeup = ws;
+	if (dev->power.wakeirq)
+		device_wakeup_attach_irq(dev, dev->power.wakeirq);
 	spin_unlock_irq(&dev->power.lock);
 	return 0;
 }
@@ -270,6 +276,85 @@ int device_wakeup_enable(struct device *dev)
 	return ret;
 }
 EXPORT_SYMBOL_GPL(device_wakeup_enable);
+
+/**
+ * device_wakeup_attach_irq - Attach a wakeirq to a wakeup source
+ * @dev: Device to handle
+ * @wakeirq: Device specific wakeirq entry
+ *
+ * Attach a device wakeirq to the wakeup source so the device
+ * wake IRQ can be configured automatically for suspend and
+ * resume.
+ *
+ * Call under the device's power.lock lock.
+ */
+void device_wakeup_attach_irq(struct device *dev,
+			     struct wake_irq *wakeirq)
+{
+	struct wakeup_source *ws;
+
+	ws = dev->power.wakeup;
+	if (!ws)
+		return;
+
+	if (ws->wakeirq)
+		dev_err(dev, "Leftover wakeup IRQ found, overriding\n");
+
+	ws->wakeirq = wakeirq;
+}
+
+/**
+ * device_wakeup_detach_irq - Detach a wakeirq from a wakeup source
+ * @dev: Device to handle
+ *
+ * Removes a device wakeirq from the wakeup source.
+ *
+ * Call under the device's power.lock lock.
+ */
+void device_wakeup_detach_irq(struct device *dev)
+{
+	struct wakeup_source *ws;
+
+	ws = dev->power.wakeup;
+	if (ws)
+		ws->wakeirq = NULL;
+}
+
+/**
+ * device_wakeup_arm_wake_irqs(void)
+ *
+ * Itereates over the list of device wakeirqs to arm them.
+ */
+void device_wakeup_arm_wake_irqs(void)
+{
+	struct wakeup_source *ws;
+	int srcuidx;
+
+	srcuidx = srcu_read_lock(&wakeup_srcu);
+	list_for_each_entry_rcu(ws, &wakeup_sources, entry) {
+		if (ws->wakeirq)
+			dev_pm_arm_wake_irq(ws->wakeirq);
+	}
+	srcu_read_unlock(&wakeup_srcu, srcuidx);
+}
+
+/**
+ * device_wakeup_disarm_wake_irqs(void)
+ *
+ * Itereates over the list of device wakeirqs to disarm them.
+ */
+void device_wakeup_disarm_wake_irqs(void)
+{
+	struct wakeup_source *ws;
+	int srcuidx;
+
+	srcuidx = srcu_read_lock(&wakeup_srcu);
+	list_for_each_entry_rcu(ws, &wakeup_sources, entry) {
+		if (ws->wakeirq)
+			dev_pm_disarm_wake_irq(ws->wakeirq);
+	}
+	srcu_read_unlock(&wakeup_srcu, srcuidx);
+}
 
 /**
  * device_wakeup_detach - Detach a device's wakeup source object from it.
@@ -384,6 +469,20 @@ int device_set_wakeup_enable(struct device *dev, bool enable)
 }
 EXPORT_SYMBOL_GPL(device_set_wakeup_enable);
 
+/**
+ * wakeup_source_not_registered - validate the given wakeup source.
+ * @ws: Wakeup source to be validated.
+ */
+static bool wakeup_source_not_registered(struct wakeup_source *ws)
+{
+	/*
+	 * Use timer struct to check if the given source is initialized
+	 * by wakeup_source_add.
+	 */
+	return ws->timer.function != pm_wakeup_timer_fn ||
+		   ws->timer.data != (unsigned long)ws;
+}
+
 /*
  * The functions below use the observation that each wakeup event starts a
  * period in which the system should not be suspended.  The moment this period
@@ -423,6 +522,10 @@ EXPORT_SYMBOL_GPL(device_set_wakeup_enable);
 static void wakeup_source_activate(struct wakeup_source *ws)
 {
 	unsigned int cec;
+
+	if (WARN_ONCE(wakeup_source_not_registered(ws),
+			"unregistered wakeup source\n"))
+		return;
 
 	/*
 	 * active wakeup source should bring the system
@@ -800,10 +903,20 @@ void pm_system_wakeup(void)
 	pm_abort_suspend = true;
 	freeze_wake();
 }
+EXPORT_SYMBOL_GPL(pm_system_wakeup);
 
 void pm_wakeup_clear(void)
 {
 	pm_abort_suspend = false;
+	pm_wakeup_irq = 0;
+}
+
+void pm_system_irq_wakeup(unsigned int irq_number)
+{
+	if (pm_wakeup_irq == 0) {
+		pm_wakeup_irq = irq_number;
+		pm_system_wakeup();
+	}
 }
 
 /**
