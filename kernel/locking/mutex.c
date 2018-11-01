@@ -25,7 +25,7 @@
 #include <linux/spinlock.h>
 #include <linux/interrupt.h>
 #include <linux/debug_locks.h>
-#include "mcs_spinlock.h"
+#include <linux/osq_lock.h>
 
 /*
  * In the DEBUG case we are using the "NULL fastpath" for mutexes,
@@ -217,44 +217,35 @@ ww_mutex_set_context_slowpath(struct ww_mutex *lock,
 }
 
 #ifdef CONFIG_MUTEX_SPIN_ON_OWNER
-static inline bool owner_running(struct mutex *lock, struct task_struct *owner)
-{
-	if (lock->owner != owner)
-		return false;
-
-	/*
-	 * Ensure we emit the owner->on_cpu, dereference _after_ checking
-	 * lock->owner still matches owner, if that fails, owner might
-	 * point to free()d memory, if it still matches, the rcu_read_lock()
-	 * ensures the memory stays valid.
-	 */
-	barrier();
-
-	return owner->on_cpu;
-}
-
 /*
  * Look out! "owner" is an entirely speculative pointer
  * access and not reliable.
  */
 static noinline
-int mutex_spin_on_owner(struct mutex *lock, struct task_struct *owner)
+bool mutex_spin_on_owner(struct mutex *lock, struct task_struct *owner)
 {
+	bool ret = true;
+
 	rcu_read_lock();
-	while (owner_running(lock, owner)) {
-		if (need_resched())
+	while (lock->owner == owner) {
+		/*
+		 * Ensure we emit the owner->on_cpu, dereference _after_
+		 * checking lock->owner still matches owner. If that fails,
+		 * owner might point to freed memory. If it still matches,
+		 * the rcu_read_lock() ensures the memory stays valid.
+		 */
+		barrier();
+
+		if (!owner->on_cpu || need_resched()) {
+			ret = false;
 			break;
+		}
 
 		cpu_relax_lowlatency();
 	}
 	rcu_read_unlock();
 
-	/*
-	 * We break out the loop above on need_resched() and when the
-	 * owner changed, which is a sign for heavy contention. Return
-	 * success only when lock->owner is NULL.
-	 */
-	return lock->owner == NULL;
+	return ret;
 }
 
 /*
@@ -396,8 +387,14 @@ done:
 	 * reschedule now, before we try-lock the mutex. This avoids getting
 	 * scheduled out right after we obtained the mutex.
 	 */
-	if (need_resched())
+	if (need_resched()) {
+		/*
+		 * We _should_ have TASK_RUNNING here, but just in case
+		 * we do not, make it so, otherwise we might get stuck.
+		 */
+		__set_current_state(TASK_RUNNING);
 		schedule_preempt_disabled();
+	}
 
 	return false;
 }
