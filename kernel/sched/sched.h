@@ -83,6 +83,10 @@ static inline void update_cpu_load_active(struct rq *this_rq) { }
  */
 #define RUNTIME_INF	((u64)~0ULL)
 
+static inline int idle_policy(int policy)
+{
+	return policy == SCHED_IDLE;
+}
 static inline int fair_policy(int policy)
 {
 	return policy == SCHED_NORMAL || policy == SCHED_BATCH;
@@ -96,6 +100,11 @@ static inline int rt_policy(int policy)
 static inline int dl_policy(int policy)
 {
 	return policy == SCHED_DEADLINE;
+}
+static inline bool valid_policy(int policy)
+{
+	return idle_policy(policy) || fair_policy(policy) ||
+		rt_policy(policy) || dl_policy(policy);
 }
 
 static inline int task_has_rt_policy(struct task_struct *p)
@@ -591,8 +600,6 @@ struct rq {
 #ifdef CONFIG_NO_HZ_FULL
 	unsigned long last_sched_tick;
 #endif
-	int skip_clock_update;
-
 	/* capture load from *all* tasks on this cpu: */
 	struct load_weight load;
 	unsigned long nr_load_updates;
@@ -620,6 +627,7 @@ struct rq {
 	unsigned long next_balance;
 	struct mm_struct *prev_mm;
 
+	unsigned int clock_skip_update;
 	u64 clock;
 	u64 clock_task;
 
@@ -752,6 +760,18 @@ static inline u64 rq_clock_task(struct rq *rq)
 {
 	lockdep_assert_held(&rq->lock);
 	return rq->clock_task;
+}
+
+#define RQCF_REQ_SKIP	0x01
+#define RQCF_ACT_SKIP	0x02
+
+static inline void rq_clock_skip_update(struct rq *rq, bool skip)
+{
+	lockdep_assert_held(&rq->lock);
+	if (skip)
+		rq->clock_skip_update |= RQCF_REQ_SKIP;
+	else
+		rq->clock_skip_update &= ~RQCF_REQ_SKIP;
 }
 
 #ifdef CONFIG_NUMA_BALANCING
@@ -1017,17 +1037,7 @@ extern struct static_key sched_feat_keys[__SCHED_FEAT_NR];
 #define sched_feat(x) (sysctl_sched_features & (1UL << __SCHED_FEAT_##x))
 #endif /* SCHED_DEBUG && HAVE_JUMP_LABEL */
 
-#ifdef CONFIG_NUMA_BALANCING
-#define sched_feat_numa(x) sched_feat(x)
-#ifdef CONFIG_SCHED_DEBUG
-#define numabalancing_enabled sched_feat_numa(NUMA)
-#else
-extern bool numabalancing_enabled;
-#endif /* CONFIG_SCHED_DEBUG */
-#else
-#define sched_feat_numa(x) (0)
-#define numabalancing_enabled (0)
-#endif /* CONFIG_NUMA_BALANCING */
+extern struct static_key_false sched_numa_balancing;
 
 static inline u64 global_rt_period(void)
 {
@@ -1068,9 +1078,6 @@ static inline int task_on_rq_migrating(struct task_struct *p)
 
 #ifndef prepare_arch_switch
 # define prepare_arch_switch(next)	do { } while (0)
-#endif
-#ifndef finish_arch_switch
-# define finish_arch_switch(prev)	do { } while (0)
 #endif
 #ifndef finish_arch_post_lock_switch
 # define finish_arch_post_lock_switch()	do { } while (0)
@@ -1214,7 +1221,7 @@ struct sched_class {
 
 #ifdef CONFIG_SMP
 	int  (*select_task_rq)(struct task_struct *p, int task_cpu, int sd_flag, int flags);
-	void (*migrate_task_rq)(struct task_struct *p, int next_cpu);
+	void (*migrate_task_rq)(struct task_struct *p);
 
 	void (*task_waking) (struct task_struct *task);
 	void (*task_woken) (struct rq *this_rq, struct task_struct *task);
@@ -1279,6 +1286,8 @@ extern void trigger_load_balance(struct rq *rq);
 
 extern void idle_enter_fair(struct rq *this_rq);
 extern void idle_exit_fair(struct rq *this_rq);
+
+extern void set_cpus_allowed_common(struct task_struct *p, const struct cpumask *new_mask);
 
 #else
 

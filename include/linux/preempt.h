@@ -85,11 +85,19 @@
  */
 #define in_nmi()	(preempt_count() & NMI_MASK)
 
+/*
+ * The preempt_count offset after preempt_disable();
+ */
 #if defined(CONFIG_PREEMPT_COUNT)
-# define PREEMPT_DISABLE_OFFSET 1
+# define PREEMPT_DISABLE_OFFSET	PREEMPT_OFFSET
 #else
-# define PREEMPT_DISABLE_OFFSET 0
+# define PREEMPT_DISABLE_OFFSET	0
 #endif
+
+/*
+ * The preempt_count offset after spin_lock()
+ */
+#define PREEMPT_LOCK_OFFSET	PREEMPT_DISABLE_OFFSET
 
 /*
  * The preempt_count offset needed for things like:
@@ -104,7 +112,7 @@
  *
  * Work as expected.
  */
-#define SOFTIRQ_LOCK_OFFSET (SOFTIRQ_DISABLE_OFFSET + PREEMPT_DISABLE_OFFSET)
+#define SOFTIRQ_LOCK_OFFSET (SOFTIRQ_DISABLE_OFFSET + PREEMPT_LOCK_OFFSET)
 
 /*
  * Are we running in atomic context?  WARNING: this macro cannot
@@ -113,11 +121,11 @@
  * used in the general case to determine whether sleeping is possible.
  * Do not use in_atomic() in driver code.
  */
-#define in_atomic()	((preempt_count() & ~PREEMPT_ACTIVE) != 0)
+#define in_atomic()	(preempt_count() != 0)
 
 /*
  * Check whether we were atomic before we did preempt_disable():
- * (used by the scheduler, *after* releasing the kernel lock)
+ * (used by the scheduler)
  */
 #define in_atomic_preempt_off() \
 		((preempt_count() & ~PREEMPT_ACTIVE) != PREEMPT_DISABLE_OFFSET)
@@ -131,7 +139,8 @@
 #if defined(CONFIG_DEBUG_PREEMPT) || defined(CONFIG_PREEMPT_TRACER)
 extern void preempt_count_add(int val);
 extern void preempt_count_sub(int val);
-#define preempt_count_dec_and_test() ({ preempt_count_sub(1); should_resched(); })
+#define preempt_count_dec_and_test() \
+	({ preempt_count_sub(1); should_resched(0); })
 #else
 #define preempt_count_add(val)	__preempt_count_add(val)
 #define preempt_count_sub(val)	__preempt_count_sub(val)
@@ -168,20 +177,34 @@ do { \
 		__preempt_schedule(); \
 } while (0)
 
+#define preempt_enable_notrace() \
+do { \
+	barrier(); \
+	if (unlikely(__preempt_count_dec_and_test())) \
+		__preempt_schedule_notrace(); \
+} while (0)
+
 #define preempt_check_resched() \
 do { \
-	if (should_resched()) \
+	if (should_resched(0)) \
 		__preempt_schedule(); \
 } while (0)
 
-#else
+#else /* !CONFIG_PREEMPT */
 #define preempt_enable() \
 do { \
 	barrier(); \
 	preempt_count_dec(); \
 } while (0)
+
+#define preempt_enable_notrace() \
+do { \
+	barrier(); \
+	__preempt_count_dec(); \
+} while (0)
+
 #define preempt_check_resched() do { } while (0)
-#endif
+#endif /* CONFIG_PREEMPT */
 
 #define preempt_disable_notrace() \
 do { \
@@ -194,26 +217,6 @@ do { \
 	barrier(); \
 	__preempt_count_dec(); \
 } while (0)
-
-#ifdef CONFIG_PREEMPT
-
-#ifndef CONFIG_CONTEXT_TRACKING
-#define __preempt_schedule_context() __preempt_schedule()
-#endif
-
-#define preempt_enable_notrace() \
-do { \
-	barrier(); \
-	if (unlikely(__preempt_count_dec_and_test())) \
-		__preempt_schedule_context(); \
-} while (0)
-#else
-#define preempt_enable_notrace() \
-do { \
-	barrier(); \
-	__preempt_count_dec(); \
-} while (0)
-#endif
 
 #else /* !CONFIG_PREEMPT_COUNT */
 

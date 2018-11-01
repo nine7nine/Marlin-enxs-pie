@@ -9,6 +9,7 @@
 #include <linux/mm.h>
 #include <linux/wait.h>
 #include <linux/hash.h>
+#include <linux/kthread.h>
 
 void __init_waitqueue_head(wait_queue_head_t *q, const char *name, struct lock_class_key *key)
 {
@@ -297,6 +298,10 @@ int autoremove_wake_function(wait_queue_t *wait, unsigned mode, int sync, void *
 }
 EXPORT_SYMBOL(autoremove_wake_function);
 
+static inline bool is_kthread_should_stop(void)
+{
+	return (current->flags & PF_KTHREAD) && kthread_should_stop();
+}
 
 /*
  * DEFINE_WAIT_FUNC(wait, woken_wake_func);
@@ -326,7 +331,7 @@ long wait_woken(wait_queue_t *wait, unsigned mode, long timeout)
 	 * woken_wake_function() such that if we observe WQ_FLAG_WOKEN we must
 	 * also observe all state before the wakeup.
 	 */
-	if (!(wait->flags & WQ_FLAG_WOKEN))
+	if (!(wait->flags & WQ_FLAG_WOKEN) && !is_kthread_should_stop())
 		timeout = schedule_timeout(timeout);
 	__set_current_state(TASK_RUNNING);
 
@@ -336,7 +341,7 @@ long wait_woken(wait_queue_t *wait, unsigned mode, long timeout)
 	 * condition being true _OR_ WQ_FLAG_WOKEN such that we will not miss
 	 * an event.
 	 */
-	set_mb(wait->flags, wait->flags & ~WQ_FLAG_WOKEN); /* B */
+	smp_store_mb(wait->flags, wait->flags & ~WQ_FLAG_WOKEN); /* B */
 
 	return timeout;
 }
@@ -349,7 +354,7 @@ int woken_wake_function(wait_queue_t *wait, unsigned mode, int sync, void *key)
 	 * doesn't imply write barrier and the users expects write
 	 * barrier semantics on wakeup functions.  The following
 	 * smp_wmb() is equivalent to smp_wmb() in try_to_wake_up()
-	 * and is paired with set_mb() in wait_woken().
+	 * and is paired with smp_store_mb() in wait_woken().
 	 */
 	smp_wmb(); /* C */
 	wait->flags |= WQ_FLAG_WOKEN;

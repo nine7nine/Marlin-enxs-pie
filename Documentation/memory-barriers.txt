@@ -1584,7 +1584,7 @@ CPU from reordering them.
 
 There are some more advanced barrier functions:
 
- (*) set_mb(var, value)
+ (*) smp_store_mb(var, value)
 
      This assigns the value to the variable and then inserts a full memory
      barrier after it, depending on the function.  It isn't guaranteed to
@@ -1855,7 +1855,7 @@ after it has altered the task state:
 	CPU 1
 	===============================
 	set_current_state();
-	  set_mb();
+	  smp_store_mb();
 	    STORE current->state
 	    <general barrier>
 	LOAD event_indicated
@@ -1896,7 +1896,7 @@ between the STORE to indicate the event and the STORE to set TASK_RUNNING:
 	CPU 1				CPU 2
 	===============================	===============================
 	set_current_state();		STORE event_indicated
-	  set_mb();			wake_up();
+	  smp_store_mb();		wake_up();
 	    STORE current->state	  <write barrier>
 	    <general barrier>		  STORE current->state
 	LOAD event_indicated
@@ -2253,9 +2253,7 @@ about the state (old or new) implies an SMP-conditional general memory barrier
 explicit lock operations, described later).  These include:
 
 	xchg();
-	cmpxchg();
 	atomic_xchg();			atomic_long_xchg();
-	atomic_cmpxchg();		atomic_long_cmpxchg();
 	atomic_inc_return();		atomic_long_inc_return();
 	atomic_dec_return();		atomic_long_dec_return();
 	atomic_add_return();		atomic_long_add_return();
@@ -2268,7 +2266,9 @@ explicit lock operations, described later).  These include:
 	test_and_clear_bit();
 	test_and_change_bit();
 
-	/* when succeeds (returns 1) */
+	/* when succeeds */
+	cmpxchg();
+	atomic_cmpxchg();		atomic_long_cmpxchg();
 	atomic_add_unless();		atomic_long_add_unless();
 
 These are used for such things as implementing ACQUIRE-class and RELEASE-class
