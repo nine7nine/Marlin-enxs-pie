@@ -1987,6 +1987,7 @@ static void qup_i2c_recover_bit_bang(struct i2c_msm_ctrl *ctrl)
 	dev_warn(ctrl->dev, "Bus still busy, status %x\n", status);
 recovery_exit:
 	enable_irq(ctrl->rsrcs.irq);
+	enable_irq_wake(ctrl->rsrcs.irq);
 }
 
 static int i2c_msm_qup_post_xfer(struct i2c_msm_ctrl *ctrl, int err)
