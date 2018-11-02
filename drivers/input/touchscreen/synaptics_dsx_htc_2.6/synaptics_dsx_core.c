@@ -138,16 +138,6 @@
 static DECLARE_WAIT_QUEUE_HEAD(syn_data_ready_wq);
 #endif
 
-#ifdef CONFIG_WAKE_GESTURES
-struct synaptics_rmi4_data *gl_rmi4_data;
-
-bool scr_suspended(void)
-{
-	struct synaptics_rmi4_data *rmi4_data = gl_rmi4_data;
-	return rmi4_data->suspend;
-}
-#endif
-
 static int synaptics_rmi4_check_status(struct synaptics_rmi4_data *rmi4_data,
 		bool *was_in_bl_mode);
 static int synaptics_rmi4_free_fingers(struct synaptics_rmi4_data *rmi4_data);
@@ -158,7 +148,6 @@ static int synaptics_rmi4_hw_reset_device(struct synaptics_rmi4_data *rmi4_data)
 static irqreturn_t synaptics_rmi4_irq(int irq, void *data);
 
 #ifdef CONFIG_FB
-static void synaptics_pm_worker(struct work_struct *work);
 static int synaptics_rmi4_fb_notifier_cb(struct notifier_block *self,
 		unsigned long event, void *data);
 #endif
@@ -1374,11 +1363,7 @@ static const struct attribute_group attr_group = {
 	.attrs = htc_attrs,
 };
 
-#ifdef CONFIG_WAKE_GESTURES
-struct kobject *android_touch_kobj;
-#else
 static struct kobject *android_touch_kobj;
-#endif
 static int synaptics_rmi4_sysfs_init(struct synaptics_rmi4_data *rmi4_data, bool enable)
 {
 	if (enable) {
@@ -1874,11 +1859,6 @@ static int synaptics_rmi4_f12_abs_report(struct synaptics_rmi4_data *rmi4_data,
 			x = rmi4_data->sensor_max_x - x;
 		if (rmi4_data->hw_if->board_data->y_flip)
 			y = rmi4_data->sensor_max_y - y;
-
-#ifdef CONFIG_WAKE_GESTURES
-		if (rmi4_data->suspend && wg_switch)
-		        x += 5000;
-#endif
 
 		switch (finger_status) {
 		case F12_FINGER_STATUS:
@@ -5383,7 +5363,6 @@ static int synaptics_rmi4_probe(struct platform_device *pdev)
 	}
 
 #ifdef CONFIG_FB
-	INIT_WORK(&rmi4_data->pm_work, synaptics_pm_worker);
 	rmi4_data->fb_notifier.notifier_call = synaptics_rmi4_fb_notifier_cb;
 	retval = fb_register_client(&rmi4_data->fb_notifier);
 	if (retval < 0) {
@@ -5414,16 +5393,12 @@ static int synaptics_rmi4_probe(struct platform_device *pdev)
 			PLATFORM_DRIVER_NAME, rmi4_data);
 	if (retval < 0) {
 		dev_err(rmi4_data->pdev->dev.parent,
-				"%s: Failed to create irq thread, err = %d\n",
-				__func__, retval);
+				"%s: Failed to create irq thread\n",
+				__func__);
 		goto err_request_irq;
 	}
 
 	rmi4_data->irq_enabled = true;
-
-#ifdef CONFIG_WAKE_GESTURES
-	gl_rmi4_data = rmi4_data;
-#endif
 
 	if (rmi4_data->enable_wakeup_gesture)
 		irq_set_irq_wake(rmi4_data->irq, 1);
@@ -5456,7 +5431,7 @@ static int synaptics_rmi4_probe(struct platform_device *pdev)
 			}
 		}
 	}
-#ifdef HTC_FEATURE 
+#ifdef HTC_FEATURE
 	retval = synaptics_rmi4_sysfs_init(rmi4_data, true);
 	if (retval < 0) {
 		dev_err(&pdev->dev,
@@ -5780,17 +5755,6 @@ static void synaptics_rmi4_wakeup_gesture(struct synaptics_rmi4_data *rmi4_data,
 }
 
 #ifdef CONFIG_FB
-static void synaptics_pm_worker(struct work_struct *work)
-{
-	struct synaptics_rmi4_data *rmi4_data =
-			container_of(work, typeof(*rmi4_data), pm_work);
-
-	if (rmi4_data->fb_ready)
-		synaptics_rmi4_resume(&rmi4_data->pdev->dev);
-	else
-		synaptics_rmi4_suspend(&rmi4_data->pdev->dev);
-}
-
 static int synaptics_rmi4_fb_notifier_cb(struct notifier_block *self,
 		unsigned long event, void *data)
 {
@@ -5805,12 +5769,12 @@ static int synaptics_rmi4_fb_notifier_cb(struct notifier_block *self,
 		dev_info(rmi4_data->pdev->dev.parent, "%s, event = %ld blank = %d\n",
 				__func__, event, *transition);
 		if (*transition == FB_BLANK_POWERDOWN) {
+			synaptics_rmi4_suspend(&rmi4_data->pdev->dev);
 			rmi4_data->fb_ready = false;
-			schedule_work(&rmi4_data->pm_work);
 		} else if ((*transition == FB_BLANK_NORMAL || *transition == FB_BLANK_UNBLANK)
 				&& (rmi4_data->fb_ready == false)) {
+			synaptics_rmi4_resume(&rmi4_data->pdev->dev);
 			rmi4_data->fb_ready = true;
-			schedule_work(&rmi4_data->pm_work);
 		}
 	}
 
@@ -5912,14 +5876,6 @@ static int synaptics_rmi4_suspend(struct device *dev)
 	if (rmi4_data->stay_awake)
 		return 0;
 
-#ifdef CONFIG_WAKE_GESTURES
-	if (wg_switch) {
-		enable_irq_wake(rmi4_data->irq);
-		rmi4_data->suspend = true;
-		return 0;
-	}
-#endif
-
 	if (rmi4_data->enable_wakeup_gesture) {
 		synaptics_rmi4_wakeup_gesture(rmi4_data, true);
 		enable_irq_wake(rmi4_data->irq);
@@ -5940,10 +5896,13 @@ exit:
 	}
 	mutex_unlock(&exp_data.mutex);
 
+#ifdef USE_I2C_SWITCH
 	gpio_set_value(rmi4_data->hw_if->board_data->switch_gpio, 1);
 	dev_dbg(rmi4_data->pdev->dev.parent,
 		"%s: Switch I2C mux to sensor hub\n",
 		__func__);
+#endif // USE_I2C_SWITCH
+
 	rmi4_data->suspend = true;
 
 	return 0;
@@ -5960,24 +5919,14 @@ static int synaptics_rmi4_resume(struct device *dev)
 	if (rmi4_data->stay_awake)
 		return 0;
 
-#ifdef CONFIG_WAKE_GESTURES
-	if (!wg_switch) {
-#endif
+#ifdef USE_I2C_SWITCH
 	gpio_set_value(rmi4_data->hw_if->board_data->switch_gpio, 0);
-	dev_dbg(rmi4_data->pdev->dev.parent, "%s: Switch I2C mux to AP\n",
+	dev_dbg(rmi4_data->pdev->dev.parent,
+			"%s: Switch I2C mux to AP\n",
 			__func__);
+#endif // USE_I2C_SWITCH
 
-#ifdef CONFIG_WAKE_GESTURES
-	}
-#endif
 	synaptics_rmi4_free_fingers(rmi4_data);
-
-#ifdef CONFIG_WAKE_GESTURES
-	if (wg_switch) {
-		disable_irq_wake(rmi4_data->irq);
-		goto exit;
-	}
-#endif
 
 	if (rmi4_data->enable_wakeup_gesture) {
 		synaptics_rmi4_wakeup_gesture(rmi4_data, false);
@@ -5988,9 +5937,11 @@ static int synaptics_rmi4_resume(struct device *dev)
 
 	rmi4_data->current_page = MASK_8BIT;
 
+	synaptics_rmi4_sleep_enable(rmi4_data, false);
+#ifdef USE_I2C_SWITCH
 	synaptics_rmi4_wakeup_gesture(rmi4_data, false);
 	synaptics_rmi4_force_cal(rmi4_data);
-	synaptics_rmi4_sleep_enable(rmi4_data, false);
+#endif
 	synaptics_rmi4_irq_enable(rmi4_data, true, false);
 
 exit:
@@ -6011,13 +5962,6 @@ exit:
 	mutex_unlock(&exp_data.mutex);
 
 	rmi4_data->suspend = false;
-
-#ifdef CONFIG_WAKE_GESTURES
-	if (wg_changed) {
-		wg_switch = wg_switch_temp;
-		wg_changed = false;
-	}
-#endif
 
 	return 0;
 }
