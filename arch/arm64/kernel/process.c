@@ -387,6 +387,12 @@ static void tls_thread_switch(struct task_struct *next)
 
 	write_sysreg(next->thread.tp_value, tpidr_el0);
 }
+static void tlb_flush_thread(struct task_struct *prev)
+{
+/* Flush the prev task&apos;s TLB entries */
+if (prev->mm)
+flush_tlb_mm(prev->mm);
+}
 
 /* Restore the UAO state depending on next's addr_limit */
 static void uao_thread_switch(struct task_struct *next)
@@ -397,12 +403,6 @@ static void uao_thread_switch(struct task_struct *next)
 		else
 			asm(ALTERNATIVE("nop", SET_PSTATE_UAO(0), ARM64_HAS_UAO));
 	}
-}
-static void tlb_flush_thread(struct task_struct *prev)
-{
-/* Flush the prev task&apos;s TLB entries */
-if (prev->mm)
-flush_tlb_mm(prev->mm);
 }
 
 #ifdef CONFIG_THREAD_INFO_IN_TASK

@@ -4,7 +4,7 @@ echo "Applying all patches"
 
 for p in *.patch; do
 echo "$p"
-patch -Np1 -i "$p"
+git am "$p"
 echo "---"
 done
 

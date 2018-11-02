@@ -326,6 +326,17 @@ lr	.req	x30		// link register
 	.endm
 
 /*
+ * Annotate a function as position independent, i.e., safe to be called before
+ * the kernel virtual mapping is activated.
+ */
+#define ENDPIPROC(x)			\
+	.globl	__pi_##x;		\
+	.type 	__pi_##x, %function;	\
+	.set	__pi_##x, x;		\
+	.size	__pi_##x, . - x;	\
+	ENDPROC(x)
+
+/*
  * Return the current thread_info.
  */
 	.macro	get_thread_info, rd
@@ -337,17 +348,6 @@ lr	.req	x30		// link register
 	and     \rd, \rd, #~(THREAD_SIZE - 1)   // top of stack
 #endif
 	.endm
-
-/*
- * Annotate a function as position independent, i.e., safe to be called before
- * the kernel virtual mapping is activated.
- */
-#define ENDPIPROC(x)			\
-	.globl	__pi_##x;		\
-	.type 	__pi_##x, %function;	\
-	.set	__pi_##x, x;		\
-	.size	__pi_##x, . - x;	\
-	ENDPROC(x)
 
 	/*
 	 * mov_q - move an immediate constant into a 64-bit register using

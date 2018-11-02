@@ -11,7 +11,6 @@
 #include <linux/stacktrace.h>
 #include <linux/completion.h>
 #include <linux/cpumask.h>
-#include <linux/page-debug-flags.h>
 #include <linux/uprobes.h>
 #include <linux/page-flags-layout.h>
 #include <linux/workqueue.h>
@@ -485,6 +484,10 @@ struct mm_struct {
 	struct work_struct async_put_work;
 #ifdef CONFIG_MSM_APP_SETTINGS
 	int app_setting;
+#endif
+
+#ifdef CONFIG_HUGETLB_PAGE
+	atomic_long_t hugetlb_usage;
 #endif
 };
 

@@ -412,7 +412,14 @@ static inline int uart_tx_stopped(struct uart_port *port)
 
 static inline bool uart_cts_enabled(struct uart_port *uport)
 {
-	return uport->status & UPSTAT_CTS_ENABLE;
+	return !!(uport->status & UPSTAT_CTS_ENABLE);
+}
+
+static inline bool uart_softcts_mode(struct uart_port *uport)
+{
+	upstat_t mask = UPSTAT_CTS_ENABLE | UPSTAT_AUTOCTS;
+
+	return ((uport->status & mask) == UPSTAT_CTS_ENABLE);
 }
 
 /*

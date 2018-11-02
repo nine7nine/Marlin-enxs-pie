@@ -1106,8 +1106,6 @@ repeat:
 			error = -EIO;
 			goto failed;
 		}
-		if (!PageLocked(page))
-			dump_page(page, "Page not locked");
 		wait_on_page_writeback(page);
 
 		if (shmem_should_replace_page(page, gfp)) {
@@ -1450,8 +1448,6 @@ static struct inode *shmem_get_inode(struct super_block *sb, const struct inode 
 			mpol_shared_policy_init(&info->policy, NULL);
 			break;
 		}
-
-		lockdep_annotate_inode_mutex_key(inode);
 	} else
 		shmem_free_inode(sb);
 	return inode;

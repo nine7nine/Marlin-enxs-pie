@@ -1514,13 +1514,6 @@ struct sched_rt_entity {
 	/* rq "owned" by this entity/group: */
 	struct rt_rq		*my_q;
 #endif
-#ifdef CONFIG_DEBUG_ATOMIC_SLEEP
-	unsigned long	task_state_change;
-#endif
-	int pagefault_disabled;
-#ifdef CONFIG_MMU
-	struct task_struct *oom_reaper_list;
-#endif
 };
 
 struct sched_dl_entity {
@@ -2068,6 +2061,13 @@ struct task_struct {
 #if defined(CONFIG_BCACHE) || defined(CONFIG_BCACHE_MODULE)
 	unsigned int	sequential_io;
 	unsigned int	sequential_io_avg;
+#endif
+#ifdef CONFIG_DEBUG_ATOMIC_SLEEP
+	unsigned long	task_state_change;
+#endif
+	int pagefault_disabled;
+#ifdef CONFIG_MMU
+	struct task_struct *oom_reaper_list;
 #endif
 	atomic64_t *concurrent_active_time;
 	atomic64_t *concurrent_policy_time;
@@ -2901,12 +2901,11 @@ static inline void mmdrop(struct mm_struct * mm)
 }
 
 /* mmput gets rid of the mappings and all user-space */
-extern int mmput(struct mm_struct *);
+extern void mmput(struct mm_struct *);
 /* same as above but performs the slow path from the async kontext. Can
  * be called from the atomic context as well
  */
 extern void mmput_async(struct mm_struct *);
-
 /* Grab a reference to a task's mm, if it is not already going away */
 extern struct mm_struct *get_task_mm(struct task_struct *task);
 /*
@@ -3123,19 +3122,11 @@ static inline struct thread_info *task_thread_info(struct task_struct *task)
 {
 	return &task->thread_info;
 }
-
-/*
- * When accessing the stack of a non-current task that might exit, use
- * try_get_task_stack() instead.  task_stack_page will return a pointer
- * that could get freed out from under you.
- */
 static inline void *task_stack_page(const struct task_struct *task)
 {
 	return task->stack;
 }
-
 #define setup_thread_stack(new,old)	do { } while(0)
-
 static inline unsigned long *end_of_stack(const struct task_struct *task)
 {
 	return task->stack;

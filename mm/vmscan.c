@@ -237,13 +237,15 @@ EXPORT_SYMBOL(register_shrinker);
  */
 void unregister_shrinker(struct shrinker *shrinker)
 {
-	if (!shrinker->nr_deferred)
-		return;
-	down_write(&shrinker_rwsem);
-	list_del(&shrinker->list);
-	up_write(&shrinker_rwsem);
+	spin_lock(&shrinker_list_lock);
+	list_del_rcu(&shrinker->list);
+	spin_unlock(&shrinker_list_lock);
+	/*
+	 * Before freeing nr_deferred, ensure all srcu
+	 * readers are done with their critical region.
+	 */
+	synchronize_srcu(&shrinker_srcu);
 	kfree(shrinker->nr_deferred);
-	shrinker->nr_deferred = NULL;
 }
 EXPORT_SYMBOL(unregister_shrinker);
 

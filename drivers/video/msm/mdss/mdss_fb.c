@@ -565,10 +565,9 @@ static void __mdss_fb_idle_notify_work(struct work_struct *work)
 
 	/* Notify idle-ness here */
 	pr_debug("Idle timeout %dms expired!\n", mfd->idle_time);
-
 	mfd->idle_state = MDSS_FB_IDLE;
-
-	/* idle_notify node events are used to reduce MDP load when idle,
+	/*
+	 * idle_notify node events are used to reduce MDP load when idle,
 	 * this is not needed for command mode panels.
 	 */
 	if (mfd->idle_time && mfd->panel.type != MIPI_CMD_PANEL)
@@ -639,26 +638,6 @@ static ssize_t mdss_fb_get_idle_notify(struct device *dev,
 		work_busy(&mfd->idle_notify_work.work) ? "no" : "yes");
 
 	return ret;
-}
-
-static ssize_t mdss_fb_get_idle_state(struct device *dev,
-		struct device_attribute *attr, char *buf)
-{
-	struct fb_info *fbi = dev_get_drvdata(dev);
-	struct msm_fb_data_type *mfd = fbi->par;
-	const char *state_strs[] = {
-		[MDSS_FB_NOT_IDLE] = "active",
-		[MDSS_FB_IDLE_TIMER_RUNNING] = "pending",
-		[MDSS_FB_IDLE] = "idle",
-	};
-	int state = mfd->idle_state;
-	const char *s;
-	if (state < ARRAY_SIZE(state_strs) && state_strs[state])
-		s = state_strs[state];
-	else
-		s = "invalid";
-
-	return scnprintf(buf, PAGE_SIZE, "%s\n", s);
 }
 
 static ssize_t mdss_fb_get_panel_info(struct device *dev,
@@ -3066,7 +3045,6 @@ static int __mdss_fb_sync_buf_done_callback(struct notifier_block *p,
 		} else {
 			mfd->idle_state = MDSS_FB_IDLE;
 		}
-
 		if (ret == -ETIME)
 			ret = NOTIFY_BAD;
 		break;

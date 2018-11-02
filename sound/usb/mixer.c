@@ -200,10 +200,13 @@ static int snd_usb_copy_string_desc(struct mixer_build *state,
 {
 	int len = usb_string(state->chip->dev, index, buf, maxlen - 1);
 
-	if (len < 0)
-		return 0;
-
+//HTC_AUD_START
+	if (len < 0) {
+		snd_printk(KERN_ERR "snd_usb_copy_string_desc: len=%d\n", len);
+		len = 0;
+	}
 	buf[len] = 0;
+//HTC_AUD_END
 	return len;
 }
 
