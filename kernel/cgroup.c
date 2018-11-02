@@ -4516,10 +4516,10 @@ static void css_free_rcu_fn(struct rcu_head *rcu_head)
 	queue_work(cgroup_destroy_wq, &css->destroy_work);
 }
 
-static void css_release_work_fn(struct swork_event *sev)
+static void css_release_work_fn(struct work_struct *work)
 {
 	struct cgroup_subsys_state *css =
-		container_of(sev, struct cgroup_subsys_state, destroy_swork);
+		container_of(work, struct cgroup_subsys_state, destroy_work);
 	struct cgroup_subsys *ss = css->ss;
 	struct cgroup *cgrp = css->cgroup;
 
@@ -4558,8 +4558,8 @@ static void css_release(struct percpu_ref *ref)
 	struct cgroup_subsys_state *css =
 		container_of(ref, struct cgroup_subsys_state, refcnt);
 
-	INIT_SWORK(&css->destroy_swork, css_release_work_fn);
-	swork_queue(&css->destroy_swork);
+	INIT_WORK(&css->destroy_work, css_release_work_fn);
+	queue_work(cgroup_destroy_wq, &css->destroy_work);
 }
 
 static void init_and_link_css(struct cgroup_subsys_state *css,
@@ -5157,7 +5157,6 @@ static int __init cgroup_wq_init(void)
 	 */
 	cgroup_destroy_wq = create_workqueue("cgroup_destroy");
 	BUG_ON(!cgroup_destroy_wq);
-	BUG_ON(swork_get());
 
 	/*
 	 * Used to destroy pidlists and separate to serve as flush domain.
