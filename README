@@ -24,7 +24,7 @@ The current status is as follows;
 current porting status/goals;
 
 - locking is almost the same as mainline (4.19), but there are still some tricky changes to pull in (working on it,
-  got some valuable insight from the linux ARM/ideas maintainer on how to resolve my current blocker).
+  got some valuable insight/an idea from the linux ARM maintainer on how to resolve my current blocker).
   
   included here, would be things like; dropping the lglock code, replacing it with percpurwsems. dropping arm64's 
   homebrew ticketed spinlock code, switching to using qrwlocks, qspinlocks, etc. etc, etc, etc..
